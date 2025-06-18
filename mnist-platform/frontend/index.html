@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MNIST 智能分析平台</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🧠 MNIST 智能分析平台</h1>
+            <p>深度学习模型训练与对比分析系统</p>
+        </header>
+
+        <nav class="tab-nav">
+            <button class="tab-btn active" data-tab="model-training">模型训练</button>
+            <button class="tab-btn" data-tab="handwriting-recognition">手写识别</button>
+            <button class="tab-btn" data-tab="training-results">训练结果</button>
+            <button class="tab-btn" data-tab="model-comparison">模型对比</button>
+        </nav>
+
+        <main>
+            <!-- 模型训练页面 -->
+            <section id="model-training" class="tab-content active">
+                <h2>选择模型进行训练</h2>
+                
+                <div class="model-selection-section">
+                    <h3>可选模型</h3>
+                    <div id="model-selection-grid" class="model-grid">
+                        <!-- 动态生成模型卡片 -->
+                    </div>
+                </div>
+                
+                <div class="training-parameters-section">
+                    <h3>训练参数设置</h3>
+                    <div id="training-parameters">
+                        <div class="parameters-panel">
+                            <div class="parameter-grid">
+                                <div class="parameter-item">
+                                    <label for="epochs-slider" class="parameter-label">训练轮数 (Epochs)</label>
+                                    <div class="slider-container">
+                                        <input type="range" id="epochs-slider" class="parameter-slider" 
+                                               min="5" max="50" value="10" 
+                                               oninput="updateSliderValue('epochs', this.value)">
+                                        <span class="slider-value" id="epochs-value">10</span>
+                                    </div>
+                                </div>
+                                
+                                <div class="parameter-item">
+                                    <label for="learning-rate-input" class="parameter-label">学习率 (Learning Rate)</label>
+                                    <select id="learning-rate-input" class="parameter-select">
+                                        <option value="0.01">0.01 (高)</option>
+                                        <option value="0.001" selected>0.001 (标准)</option>
+                                        <option value="0.0001">0.0001 (低)</option>
+                                    </select>
+                                </div>
+                                
+                                <div class="parameter-item">
+                                    <label for="batch-size-input" class="parameter-label">批次大小 (Batch Size)</label>
+                                    <select id="batch-size-input" class="parameter-select">
+                                        <option value="32">32</option>
+                                        <option value="64" selected>64</option>
+                                        <option value="128">128</option>
+                                        <option value="256">256</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="training-controls">
+                    <button id="start-training-btn" class="btn-primary" disabled>🚀 开始训练</button>
+                </div>
+                
+                <div id="training-progress-container" style="display: none;">
+                    <!-- 动态生成进度条 -->
+                </div>
+            </section>
+
+            <!-- 手写识别页面 -->
+            <section id="handwriting-recognition" class="tab-content">
+                <h2>手写数字识别</h2>
+                <div class="recognition-container">
+                    <div class="drawing-area">
+                        <div class="canvas-container">
+                            <canvas id="drawing-canvas" width="280" height="280"></canvas>
+                        </div>
+                        <div class="canvas-controls">
+                            <div class="brush-control">
+                                <label for="brush-size-slider">画笔粗细</label>
+                                <input type="range" id="brush-size-slider" class="brush-size-slider" 
+                                       min="8" max="20" value="14">
+                                <span id="brush-size-value" class="brush-size-value">14px</span>
+                            </div>
+                            <button id="clear-canvas-btn" class="btn-secondary">🧹 清除</button>
+                        </div>
+                    </div>
+                    
+                    <div class="prediction-area">
+                        <div class="model-selector">
+                            <label for="prediction-model-select">选择识别模型:</label>
+                            <select id="prediction-model-select">
+                                <option value="">请选择已训练的模型</option>
+                            </select>
+                        </div>
+                        
+                        <div class="prediction-controls">
+                            <button id="predict-btn" class="btn-primary" disabled>请选择模型</button>
+                        </div>
+                        
+                        <div id="prediction-result">
+                            <!-- 显示预测结果 -->
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 训练结果页面 -->
+            <section id="training-results" class="tab-content">
+                <h2>训练历史记录</h2>
+                <div id="history-table-container">
+                    <!-- 动态生成历史记录表格 -->
+                </div>
+            </section>
+
+            <!-- 模型对比页面 -->
+            <section id="model-comparison" class="tab-content">
+                <h2>模型性能对比</h2>
+                <div class="comparison-controls">
+                    <button id="refresh-comparison-btn" class="btn-secondary">刷新数据</button>
+                </div>
+                
+                <div class="charts-container" id="comparison-charts-container">
+                    <div class="chart-wrapper">
+                        <h3>综合性能雷达图</h3>
+                        <canvas id="radarChart"></canvas>
+                    </div>
+                    <div class="chart-wrapper">
+                        <h3>最高准确率对比</h3>
+                        <canvas id="accuracyBarChart"></canvas>
+                    </div>
+                    <div class="chart-wrapper">
+                        <h3>训练耗时对比</h3>
+                        <canvas id="speedBarChart"></canvas>
+                    </div>
+                    <div class="chart-wrapper">
+                        <h3>模型参数量对比</h3>
+                        <canvas id="paramsBarChart"></canvas>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- App Scripts -->
+    <script type="module" src="js/main.js"></script>
+</body>
+</html> 
