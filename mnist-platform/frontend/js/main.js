@@ -21,14 +21,14 @@ const AppState = {
 };
 
 // 应用初始化
-document.addEventListener('DOMContentLoaded', async () => {
+document.addEventListener('DOMContentLoaded', () => {
     console.log('🚀 MNIST 智能分析平台启动');
     
     // 初始化标签页切换
     initTabNavigation();
     
     // 初始化模型训练页
-    await initModelTrainingPage();
+    initModelTrainingPage();
     
     // 初始化事件监听器
     initEventListeners();
@@ -283,32 +283,29 @@ async function loadTrainedModelsForPrediction() {
 
 // 加载训练历史
 async function loadTrainingHistory() {
+    console.log("开始加载训练历史...");
     try {
         const historyData = await API.getTrainingHistory();
+        console.log("获取到训练历史数据:", historyData);
         UI.renderHistoryTable(historyData);
     } catch (error) {
-        console.error('加载训练历史失败:', error);
-        UI.showToast('加载训练历史失败，请查看控制台');
+        console.error("加载训练历史失败:", error);
+        // 使用正确的错误提示函数
+        UI.showErrorMessage(`加载训练历史失败: ${error.message}`);
     }
 }
 
 // 加载并显示模型对比数据
 async function loadComparisonData() {
+    console.log("开始加载模型对比数据...");
     try {
-        const historyData = await API.getTrainingHistory();
-        if (!historyData || historyData.length === 0) {
-            console.log('没有足够的历史数据进行对比。');
-            const container = document.getElementById('comparison-charts-container');
-            if(container) {
-                container.innerHTML = `<div class="empty-state">暂无训练历史，无法进行模型对比</div>`;
-            }
-            return;
-        }
-        const processedData = processDataForComparison(historyData);
-        UI.renderComparisonCharts(processedData);
+        const trainedModels = await API.getTrainedModels();
+        console.log("获取到已训练模型数据:", trainedModels);
+        UI.renderComparisonCharts(trainedModels);
     } catch (error) {
-        console.error('加载模型对比数据失败:', error);
-        UI.showToast('加载模型对比数据失败，请查看控制台');
+        console.error("加载模型对比数据失败:", error);
+        // 使用正确的错误提示函数
+        UI.showErrorMessage(`加载模型对比数据失败: ${error.message}`);
     }
 }
 
@@ -470,4 +467,9 @@ function processDataForComparison(historyData) {
 }
 
 // 导出状态（用于调试）
-window.AppState = AppState; 
+window.AppState = AppState;
+
+window.Module = {
+    // 只保留这一个由 HTML onclick 调用的函数
+    toggleHistoryDetails: UI.toggleHistoryDetails
+}; 

@@ -478,10 +478,31 @@ def get_training_history():
     """提供所有训练历史记录的接口"""
     try:
         history = PERSISTENCE_MANAGER.get_training_history()
-        # 将时间戳转换为更易读的ISO 8601格式字符串
+        
+        # 数据清洗和增强：确保每条记录都有可用的时长和ISO格式时间
         for record in history:
-            record['start_time_iso'] = datetime.fromtimestamp(record['start_time']).isoformat()
-            record['completion_time_iso'] = datetime.fromtimestamp(record['completion_time']).isoformat()
+            # 兼容处理 training_duration_sec
+            metrics = record.get('metrics', {})
+            if 'training_duration_sec' not in metrics:
+                start = record.get('start_time')
+                end = record.get('completion_time')
+                if start and end:
+                    metrics['training_duration_sec'] = end - start
+                else:
+                    metrics['training_duration_sec'] = 0
+            record['metrics'] = metrics # 确保 metrics 字典被写回
+
+            # 转换时间戳为更易读的ISO 8601格式字符串
+            if record.get('start_time'):
+                record['start_time_iso'] = datetime.fromtimestamp(record['start_time']).isoformat()
+            else:
+                record['start_time_iso'] = 'N/A' # 提供默认值
+
+            if record.get('completion_time'):
+                 record['completion_time_iso'] = datetime.fromtimestamp(record['completion_time']).isoformat()
+            else:
+                record['completion_time_iso'] = 'N/A' # 提供默认值
+
         return jsonify(history)
     except Exception as e:
         return jsonify({"error": str(e)}), 500

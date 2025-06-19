@@ -465,41 +465,71 @@ export function renderHistoryTable(historyData) {
         return;
     }
 
-    // Sort data
     const sortedData = sortHistoryData([...historyData], currentSort.column, currentSort.direction);
 
     let tableHTML = '<table class="history-table"><thead><tr>';
     const headers = {
-        date: '训练日期',
+        completion_time_iso: '训练日期',
         model_name: '模型名称',
         final_accuracy: '最终准确率',
-        epochs: '训练轮数',
-        learning_rate: '学习率',
-        batch_size: '批次大小',
-        duration: '训练耗时(秒)'
+        training_duration_sec: '训练耗时(秒)',
+        actions: '操作' // 新增操作列
     };
 
     for (const key in headers) {
-        tableHTML += createHeaderCell(key, headers[key]);
+        // 'actions' 列不可排序
+        tableHTML += createHeaderCell(key, headers[key], key !== 'actions');
     }
     tableHTML += '</tr></thead><tbody>';
 
     sortedData.forEach(record => {
-        tableHTML += `<tr>
-            <td>${formatDate(record.date)}</td>
-            <td>${record.model_name}</td>
-            <td class="accuracy-cell">${(record.final_accuracy * 100).toFixed(2)}%</td>
-            <td>${record.epochs}</td>
-            <td>${record.learning_rate}</td>
-            <td>${record.batch_size}</td>
-            <td>${record.duration.toFixed(2)}s</td>
-        </tr>`;
+        const epochs = record.hyperparameters ? record.hyperparameters.epochs : 'N/A';
+        const lr = record.hyperparameters ? record.hyperparameters.learning_rate : 'N/A';
+        const batchSize = record.hyperparameters ? record.hyperparameters.batch_size : 'N/A';
+        const accuracy = record.metrics && typeof record.metrics.final_accuracy === 'number'
+            ? (record.metrics.final_accuracy * 100).toFixed(2) + '%'
+            : 'N/A';
+        const duration = record.metrics && typeof record.metrics.training_duration_sec === 'number'
+            ? record.metrics.training_duration_sec.toFixed(2) + 's'
+            : 'N/A';
+        const trainingDate = record.completion_time_iso ? formatDate(record.completion_time_iso) : 'N/A';
+
+        // 主摘要行
+        tableHTML += `
+            <tr class="history-main-row" data-job-id="${record.job_id}">
+                <td>${trainingDate}</td>
+                <td>${record.model_name || '未知模型'}</td>
+                <td class="accuracy-cell">${accuracy}</td>
+                <td>${duration}</td>
+                <td>
+                    <button class="btn-icon btn-details" onclick="Module.toggleHistoryDetails('${record.job_id}')">
+                        <i class="fas fa-chevron-down"></i>
+                    </button>
+                </td>
+            </tr>
+        `;
+
+        // 隐藏的详情行
+        tableHTML += `
+            <tr class="history-details-row" data-job-id="${record.job_id}">
+                <td colspan="5">
+                    <div class="details-card">
+                        <h4>训练超参数详情</h4>
+                        <div class="details-grid">
+                            <div><strong>训练轮数:</strong><span>${epochs}</span></div>
+                            <div><strong>学习率:</strong><span>${lr}</span></div>
+                            <div><strong>批次大小:</strong><span>${batchSize}</span></div>
+                            <div><strong>Job ID:</strong><span class="job-id-span">${record.job_id}</span></div>
+                        </div>
+                    </div>
+                </td>
+            </tr>
+        `;
     });
 
     tableHTML += '</tbody></table>';
     container.innerHTML = tableHTML;
     
-    // Add event listeners to headers
     container.querySelectorAll('.sortable').forEach(th => {
         th.addEventListener('click', () => {
             const sortKey = th.dataset.sort;
@@ -509,15 +539,33 @@ export function renderHistoryTable(historyData) {
                 currentSort.column = sortKey;
                 currentSort.direction = 'desc';
             }
-            renderHistoryTable(historyData); // Re-render with new sort
+            renderHistoryTable(historyData);
         });
     });
 }
 
-function createHeaderCell(key, title) {
-    let cell = `<th data-sort="${key}" class="sortable">`;
+/**
+ * 切换训练历史详情行的可见性
+ * @param {string} jobId - 任务ID
+ */
+export function toggleHistoryDetails(jobId) {
+    const detailsRow = document.querySelector(`.history-details-row[data-job-id="${jobId}"]`);
+    const mainRow = document.querySelector(`.history-main-row[data-job-id="${jobId}"]`);
+    const buttonIcon = mainRow.querySelector('.btn-details i');
+
+    if (detailsRow && mainRow && buttonIcon) {
+        const isVisible = detailsRow.classList.toggle('visible');
+        mainRow.classList.toggle('is-expanded', isVisible);
+        buttonIcon.classList.toggle('fa-chevron-down', !isVisible);
+        buttonIcon.classList.toggle('fa-chevron-up', isVisible);
+    }
+}
+
+function createHeaderCell(key, title, sortable = true) {
+    let cellClass = sortable ? 'sortable' : '';
+    let cell = `<th data-sort="${key}" class="${cellClass}">`;
     cell += title;
-    if (currentSort.column === key) {
+    if (sortable && currentSort.column === key) {
         cell += currentSort.direction === 'asc' ? ' ▲' : ' ▼';
     }
     cell += '</th>';
@@ -536,10 +584,36 @@ function handleSort(sortKey, historyData) {
 
 function sortHistoryData(data, column, direction) {
     return data.sort((a, b) => {
-        let valA = a[column];
-        let valB = b[column];
-        
-        if (typeof valA === 'string' && column === 'date') {
+        let valA, valB;
+
+        // 根据列名从正确嵌套的对象中提取值
+        switch (column) {
+            case 'completion_time_iso':
+            case 'model_name':
+                valA = a[column];
+                valB = b[column];
+                break;
+            case 'final_accuracy':
+            case 'training_duration_sec':
+                valA = a.metrics ? a.metrics[column] : null;
+                valB = b.metrics ? b.metrics[column] : null;
+                break;
+            case 'epochs':
+            case 'learning_rate':
+            case 'batch_size':
+                valA = a.hyperparameters ? a.hyperparameters[column] : null;
+                valB = b.hyperparameters ? b.hyperparameters[column] : null;
+                break;
+            default:
+                valA = a[column];
+                valB = b[column];
+        }
+
+        // 处理null或undefined值，将它们排在最后
+        if (valA == null) return 1;
+        if (valB == null) return -1;
+
+        if (column === 'completion_time_iso') {
             valA = new Date(valA);
             valB = new Date(valB);
         }
