@@ -1,6 +1,6 @@
 // 主应用逻辑 - 状态管理、事件绑定、模块协调
 import * as API from './api.js';
-import * as Canvas from './canvas.js';
+import { init as initCanvas, getImageData, clearCanvas } from './canvas.js';
 import * as UI from './ui.js';
 import * as ChartUtils from './chart_utils.js';
 
@@ -35,17 +35,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     // 初始化全局函数
     initGlobalFunctions();
-    
-    // 页面加载时，根据初始显示的页面加载相应数据
-    const initialPage = document.querySelector('.page:not(.hidden)').id;
-    if (initialPage === 'page-history') {
-        loadTrainingHistory();
-    } else if (initialPage === 'page-comparison') {
-        loadComparisonData();
-    } else if (initialPage === 'page-training') {
-        // 首次加载训练页面时，刷新模型列表
-        UI.updateAvailableModelsList();
-    }
     
     console.log('✅ 应用初始化完成');
 });
@@ -342,79 +331,56 @@ function getTrainingParameters() {
 async function initHandwritingRecognition() {
     console.log('🎨 初始化手写识别页面');
     
+    // 初始化Canvas
+    const canvasInitialized = initCanvas(UI.updatePredictButtonState);
+    if (!canvasInitialized) {
+        UI.showErrorMessage("Canvas 初始化失败");
+        return;
+    }
+
+    // 加载已训练模型列表
+    await loadTrainedModelsForPrediction();
+}
+
+function handleCanvasClear() {
+    clearCanvas();
+}
+
+async function handlePrediction() {
+    const predictBtn = document.getElementById('predict-btn');
+    predictBtn.disabled = true;
+    predictBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> 识别中...';
+
     try {
-        // 初始化 Canvas
-        if (!UI.initializeCanvas()) {
-            UI.showErrorMessage('Canvas 初始化失败');
+        const modelSelect = document.getElementById('prediction-model-select');
+        const modelId = modelSelect.value;
+        const imageBase64 = getImageData();
+
+        if (!modelId) {
+            UI.showErrorMessage('请先选择一个识别模型');
             return;
         }
-        
-        // 加载已训练模型
-        await loadTrainedModelsForPrediction();
-        
-        // 显示空结果状态
-        UI.showEmptyResult();
-        
-        // 更新预测按钮状态
-        UI.updatePredictButtonState();
-        
-        console.log('✅ 手写识别页面初始化完成');
-        
-    } catch (error) {
-        console.error('❌ 手写识别页面初始化失败:', error);
-        UI.showErrorMessage('初始化手写识别功能失败: ' + error.message);
-    }
-}
 
-// 处理画布清除
-function handleCanvasClear() {
-    UI.clearCanvas();
-    UI.updatePredictButtonState();
-    console.log('🧹 用户清除了画布');
-}
-
-// 处理预测请求
-async function handlePrediction() {
-    const modelSelect = document.getElementById('prediction-model-select');
-    const selectedModel = modelSelect.value;
-    
-    if (!selectedModel) {
-        UI.showErrorMessage('请先选择一个模型');
-        return;
-    }
-    
-    if (UI.isCanvasEmpty()) {
-        UI.showErrorMessage('请先在画布上绘制数字');
-        return;
-    }
-    
-    try {
-        console.log('🔍 开始预测，使用模型:', selectedModel);
-        
-        // 显示加载状态
-        UI.showPredictionLoading();
-        
-        // 获取画布图像数据
-        const imageData = UI.getCanvasImageData();
-        if (!imageData) {
-            throw new Error('无法获取图像数据');
+        if (!imageBase64) {
+            UI.showErrorMessage('画板为空，请先绘制一个数字');
+            return;
         }
-        
-        // 调用预测 API
-        const result = await API.predict({
-            model_id: selectedModel,
-            image_base64: imageData
-        });
-        
-        // 显示预测结果
+
+        // 开始预测
+        console.log(`🔍 开始预测，使用模型: ${modelId}`);
+        const result = await API.predict(modelId, imageBase64);
+
+        // 显示结果
         UI.renderPredictionResult(result);
         
         console.log('✅ 预测完成:', result);
-        
+
     } catch (error) {
         console.error('❌ 预测失败:', error);
         UI.showErrorMessage('预测失败: ' + error.message);
-        UI.showEmptyResult();
+    } finally {
+        predictBtn.disabled = false;
+        predictBtn.innerHTML = '识别';
     }
 }
 

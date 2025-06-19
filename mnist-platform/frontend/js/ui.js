@@ -1,6 +1,20 @@
 import * as ChartUtils from './chart_utils.js';
 // UI 操作模块 - DOM 操作：渲染、更新、隐藏/显示元素
 
+// --- DOM Element Selectors ---
+const modelSelector = document.getElementById('trainedModelSelect');
+const predictBtn = document.getElementById('predictBtn');
+const resultContainer = document.getElementById('predictionResult');
+const probabilityChartContainer = document.getElementById('probabilityChart');
+const historyTableBody = document.getElementById('historyTableBody');
+const loadingOverlay = document.getElementById('loading-overlay');
+const loadingOverlayText = document.getElementById('loading-overlay-text');
+
+// --- Global Variables ---
+let probabilityChart = null; // To hold the chart instance
+
+// UI 操作模块 - DOM 操作：渲染、更新、隐藏/显示元素
+
 // 渲染模型选择卡片
 export function renderModelCards(models) {
     const container = document.getElementById('model-selection-grid');
@@ -237,13 +251,12 @@ export function updateProgressBar(jobId, progressData) {
         lossElement.textContent = progress.loss.toFixed(4);
     }
     
-    // 更新性能指标
-    if (progress.samples_per_sec !== undefined && speedElement) {
-        speedElement.textContent = `${Math.round(progress.samples_per_sec)} samples/s`;
+    if (progress.samples_per_second !== undefined) {
+        speedElement.textContent = `${Math.round(progress.samples_per_second)} samples/s`;
     }
-    
-    if (progress.learning_rate !== undefined && learningRateElement) {
-        learningRateElement.textContent = progress.learning_rate.toFixed(6);
+
+    if (progressData.config && progressData.config.learning_rate) {
+        learningRateElement.textContent = progressData.config.learning_rate;
     }
 }
 
@@ -253,467 +266,284 @@ function getStatusText(status) {
         'queued': '排队中',
         'running': '训练中',
         'completed': '已完成',
-        'failed': '训练失败'
+        'error': '错误',
+        'cancelled': '已取消'
     };
-    return statusMap[status] || status;
+    return statusMap[status] || '未知状态';
 }
 
-console.log('📱 UI 模块已加载');
+// --- Canvas Drawing ---
+let canvas, ctx, isDrawing = false, lastX, lastY;
 
-// ==================== 手写识别 Canvas 绘制功能 ====================
-
-// Canvas 绘制状态
-let canvasState = {
-    isDrawing: false,
-    lastX: 0,
-    lastY: 0,
-    brushSize: 14,
-    canvas: null,
-    ctx: null,
-    updateTimer: null  // 添加防抖计时器
-};
-
-// 初始化 Canvas
 export function initializeCanvas() {
-    const canvas = document.getElementById('drawing-canvas');
+    canvas = document.getElementById('drawing-canvas');
     if (!canvas) {
-        console.error('❌ 未找到绘制画布');
-        return false;
+        console.error('未找到 canvas 元素');
+        return;
     }
+    ctx = canvas.getContext('2d');
+    ctx.strokeStyle = '#FFFFFF';
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
     
-    canvasState.canvas = canvas;
-    canvasState.ctx = canvas.getContext('2d');
-    
-    // 设置 Canvas 绘制样式
-    canvasState.ctx.strokeStyle = '#ffffff';
-    canvasState.ctx.lineWidth = canvasState.brushSize;
-    canvasState.ctx.lineCap = 'round';
-    canvasState.ctx.lineJoin = 'round';
-    
-    // 清空画布
-    clearCanvas();
-    
-    // 设置事件监听器
+    // 初始化画笔大小
+    const brushSlider = document.getElementById('brush-size-slider');
+    updateBrushSize(parseInt(brushSlider.value));
+
+    // 绑定事件
     setupCanvasDrawing();
     
-    console.log('🎨 Canvas 初始化完成');
-    return true;
+    return true; // 明确返回成功状态
 }
 
-// 设置 Canvas 绘制事件
 export function setupCanvasDrawing() {
-    const canvas = canvasState.canvas;
     if (!canvas) return;
-    
-    // 鼠标事件
     canvas.addEventListener('mousedown', startDrawing);
     canvas.addEventListener('mousemove', draw);
     canvas.addEventListener('mouseup', stopDrawing);
     canvas.addEventListener('mouseout', stopDrawing);
-    
-    // 触摸事件（移动端支持）
-    canvas.addEventListener('touchstart', handleTouch);
-    canvas.addEventListener('touchmove', handleTouch);
+    canvas.addEventListener('touchstart', handleTouch, { passive: false });
+    canvas.addEventListener('touchmove', handleTouch, { passive: false });
     canvas.addEventListener('touchend', stopDrawing);
-    
-    // 防止页面滚动
-    canvas.addEventListener('touchstart', e => e.preventDefault());
-    canvas.addEventListener('touchmove', e => e.preventDefault());
 }
 
-// 开始绘制
 function startDrawing(e) {
-    canvasState.isDrawing = true;
-    const coords = getCoordinates(e);
-    canvasState.lastX = coords.x;
-    canvasState.lastY = coords.y;
-    
-    // 立即更新按钮状态（开始绘制时）
-    setTimeout(() => updatePredictButtonState(), 10);
+    isDrawing = true;
+    [lastX, lastY] = getCoordinates(e);
 }
 
-// 绘制过程
 function draw(e) {
-    if (!canvasState.isDrawing) return;
-    
-    const coords = getCoordinates(e);
-    const ctx = canvasState.ctx;
-    
+    if (!isDrawing) return;
+    const [x, y] = getCoordinates(e);
     ctx.beginPath();
-    ctx.moveTo(canvasState.lastX, canvasState.lastY);
-    ctx.lineTo(coords.x, coords.y);
+    ctx.moveTo(lastX, lastY);
+    ctx.lineTo(x, y);
     ctx.stroke();
-    
-    canvasState.lastX = coords.x;
-    canvasState.lastY = coords.y;
-    
-    // 绘制过程中更新按钮状态（防抖）
-    if (!canvasState.updateTimer) {
-        canvasState.updateTimer = setTimeout(() => {
-            updatePredictButtonState();
-            canvasState.updateTimer = null;
-        }, 50);
-    }
+    [lastX, lastY] = [x, y];
 }
 
-// 停止绘制
 function stopDrawing() {
-    if (canvasState.isDrawing) {
-        canvasState.isDrawing = false;
-        
-        // 绘制完成后立即更新按钮状态
-        setTimeout(() => updatePredictButtonState(), 10);
-    }
+    isDrawing = false;
 }
 
-// 处理触摸事件
 function handleTouch(e) {
     e.preventDefault();
     const touch = e.touches[0];
-    const mouseEvent = new MouseEvent(e.type === 'touchstart' ? 'mousedown' : 
-                                     e.type === 'touchmove' ? 'mousemove' : 'mouseup', {
+    const mouseEvent = new MouseEvent(e.type === 'touchstart' ? 'mousedown' : 'mousemove', {
         clientX: touch.clientX,
         clientY: touch.clientY
     });
-    canvasState.canvas.dispatchEvent(mouseEvent);
+    canvas.dispatchEvent(mouseEvent);
 }
 
-// 获取鼠标/触摸坐标
 function getCoordinates(e) {
-    const rect = canvasState.canvas.getBoundingClientRect();
-    return {
-        x: e.clientX - rect.left,
-        y: e.clientY - rect.top
-    };
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    return [
+        (e.clientX - rect.left) * scaleX, 
+        (e.clientY - rect.top) * scaleY
+    ];
 }
 
-// 清除画布
 export function clearCanvas() {
-    if (!canvasState.ctx) return;
-    
-    canvasState.ctx.fillStyle = '#000000';
-    canvasState.ctx.fillRect(0, 0, canvasState.canvas.width, canvasState.canvas.height);
-    
-    // 清除预测结果
-    const resultContainer = document.getElementById('prediction-result');
-    if (resultContainer) {
-        showEmptyResult();
+    if (ctx && canvas) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        console.log('画布已清除');
     }
-    
-    console.log('🧹 画布已清除');
 }
 
-// 更新画笔大小
 export function updateBrushSize(size) {
-    canvasState.brushSize = size;
-    if (canvasState.ctx) {
-        canvasState.ctx.lineWidth = size;
-    }
-    
-    // 更新显示值
-    const valueElement = document.getElementById('brush-size-value');
-    if (valueElement) {
-        valueElement.textContent = size + 'px';
+    if (ctx) {
+        ctx.lineWidth = size;
+        document.getElementById('brush-size-value').textContent = `${size}px`;
     }
 }
 
-// 获取 Canvas 图像数据
 export function getCanvasImageData() {
-    if (!canvasState.canvas) {
-        console.error('❌ Canvas 未初始化');
-        return null;
+    if (canvas) {
+        return canvas.toDataURL('image/png');
     }
-    
-    try {
-        // 获取 Canvas 的 base64 数据
-        const imageData = canvasState.canvas.toDataURL('image/png');
-        console.log('📷 已获取 Canvas 图像数据');
-        return imageData;
-    } catch (error) {
-        console.error('❌ 获取图像数据失败:', error);
-        return null;
-    }
+    return null;
 }
 
-// 检查画布是否为空
 export function isCanvasEmpty() {
-    if (!canvasState.canvas) return true;
-    
-    const ctx = canvasState.ctx;
-    const imageData = ctx.getImageData(0, 0, canvasState.canvas.width, canvasState.canvas.height);
-    
-    // 检查是否所有像素都是黑色 (RGB = 0,0,0)
-    for (let i = 0; i < imageData.data.length; i += 4) {
-        // 检查 RGB 值，如果任何一个不是 0，说明有绘制内容
-        if (imageData.data[i] > 0 || imageData.data[i + 1] > 0 || imageData.data[i + 2] > 0) {
-            return false;
-        }
-    }
-    return true;
+    if (!ctx || !canvas) return true;
+    const pixelBuffer = new Uint32Array(
+        ctx.getImageData(0, 0, canvas.width, canvas.height).data.buffer
+    );
+    // 检查是否有非黑色像素
+    return !pixelBuffer.some(color => color !== 0xFF000000);
 }
 
-// 渲染预测结果
+
+// --- Prediction UI ---
 export function renderPredictionResult(result) {
-    const container = document.getElementById('prediction-result');
-    if (!container) {
-        console.error('❌ 未找到预测结果容器');
+    if (!result) {
+        showEmptyResult();
         return;
     }
-    
-    const prediction = result.prediction;
-    const probabilities = result.probabilities;
-    const confidence = Math.max(...probabilities);
-    
+    const container = document.getElementById('prediction-result');
     container.innerHTML = `
-        <div class="prediction-display">
-            <div class="predicted-digit">${prediction}</div>
-            <div class="confidence-score">置信度: ${(confidence * 100).toFixed(1)}%</div>
+        <div class="prediction-number">
+            预测结果: <span class="predicted-digit">${result.prediction}</span>
         </div>
-        
-        <div class="probabilities-container">
-            <div class="probabilities-title">各数字概率分布</div>
-            <div class="probability-bars">
-                ${probabilities.map((prob, index) => `
-                    <div class="probability-item">
-                        <div class="probability-digit">${index}</div>
-                        <div class="probability-bar">
-                            <div class="probability-fill ${prob === confidence ? 'highest' : ''}" 
-                                 style="height: ${prob * 100}%"></div>
-                        </div>
-                        <div class="probability-value">${(prob * 100).toFixed(1)}%</div>
-                    </div>
-                `).join('')}
-            </div>
+        <div class="prediction-confidence">
+            置信度: <span class="confidence-value">${(result.confidence * 100).toFixed(2)}%</span>
+        </div>
+        <div class="prediction-chart-container">
+            <canvas id="prediction-chart"></canvas>
         </div>
     `;
     
-    console.log(`🎯 预测结果已显示: ${prediction} (置信度: ${(confidence * 100).toFixed(1)}%)`);
+    // 渲染概率图表
+    renderProbabilityChart(result.probabilities);
+    console.log('✅ 已渲染预测结果:', result);
 }
 
-// 显示加载状态
 export function showPredictionLoading() {
     const container = document.getElementById('prediction-result');
-    if (!container) return;
-    
-    container.innerHTML = `
-        <div class="empty-result">
-            <div class="loading-spinner"></div>
-            <div class="empty-result-text">正在识别中...</div>
-            <div class="empty-result-hint">请稍候</div>
-        </div>
-    `;
+    container.innerHTML = '<div class="loading-spinner"></div><p>正在识别中...</p>';
 }
 
-// 显示空结果状态
 export function showEmptyResult() {
     const container = document.getElementById('prediction-result');
-    if (!container) return;
-    
-    container.innerHTML = `
-        <div class="empty-result">
-            <div class="empty-result-icon">✏️</div>
-            <div class="empty-result-text">请在左侧画布上绘制数字</div>
-            <div class="empty-result-hint">画完后点击"识别"按钮</div>
-        </div>
-    `;
+    container.innerHTML = '<p class="empty-state">请在左侧绘制数字，然后点击"识别"按钮</p>';
 }
 
-// 渲染已训练模型选择器
+// --- Trained Model Selector for Prediction ---
 export function renderTrainedModels(models) {
-    const select = document.getElementById('prediction-model-select');
-    if (!select) {
-        console.error('❌ 未找到模型选择器');
-        return;
-    }
-    
-    // 清空现有选项
-    select.innerHTML = '<option value="">请选择已训练的模型</option>';
-    
-    if (models.length === 0) {
-        const option = document.createElement('option');
-        option.value = '';
-        option.textContent = '暂无已训练的模型';
-        option.disabled = true;
-        select.appendChild(option);
-        return;
-    }
-    
-    // 添加模型选项
+    const selectElement = document.getElementById('prediction-model-select');
+    if (!selectElement) return;
+
+    // 保存当前选中的值
+    const currentValue = selectElement.value;
+
+    selectElement.innerHTML = '<option value="">请选择已训练的模型</option>';
     models.forEach(model => {
         const option = document.createElement('option');
         option.value = model.id;
-        option.textContent = `${model.name} (准确率: ${(model.accuracy * 100).toFixed(2)}%)`;
-        select.appendChild(option);
+        option.textContent = model.name;
+        selectElement.appendChild(option);
     });
     
-    console.log('📋 已更新模型选择器:', models.length, '个模型');
+    // 恢复之前的选中状态
+    if (currentValue && models.some(m => m.id === currentValue)) {
+        selectElement.value = currentValue;
+    }
+
+    updatePredictButtonState();
 }
 
-// 更新预测按钮状态
 export function updatePredictButtonState() {
+    const selectElement = document.getElementById('prediction-model-select');
     const predictBtn = document.getElementById('predict-btn');
-    const modelSelect = document.getElementById('prediction-model-select');
-    
-    if (!predictBtn || !modelSelect) return;
-    
-    const hasModel = modelSelect.value !== '';
-    const hasDrawing = !isCanvasEmpty();
-    
-    predictBtn.disabled = !hasModel || !hasDrawing;
-    
-    // 更新按钮文本
-    if (!hasModel) {
-        predictBtn.textContent = '请选择模型';
-    } else if (!hasDrawing) {
-        predictBtn.textContent = '请先绘制数字';
-    } else {
-        predictBtn.textContent = '🔍 识别';
+    if (selectElement && predictBtn) {
+        const selectedModel = selectElement.value;
+        if (selectedModel) {
+            predictBtn.disabled = false;
+            predictBtn.textContent = '🧠 开始识别';
+        } else {
+            predictBtn.disabled = true;
+            predictBtn.textContent = '请先选择模型';
+        }
     }
 }
 
-console.log('🎨 Canvas 绘制模块已加载');
 
-// ==================== 训练结果页面 ====================
+// --- History Table ---
+let currentSort = { column: 'date', direction: 'desc' };
 
-// 存储当前排序状态
-let historySortState = {
-    column: 'completion_time',
-    direction: 'desc'
-};
-
-/**
- * 渲染训练历史记录表格
- * @param {Array} historyData - 从API获取的训练历史数组
- */
 export function renderHistoryTable(historyData) {
     const container = document.getElementById('history-table-container');
-    if (!container) {
-        console.error('❌ 未找到历史记录表格容器');
-        return;
-    }
+    if (!container) return;
 
     if (!historyData || historyData.length === 0) {
-        container.innerHTML = `<div class="empty-state">暂无训练历史记录</div>`;
+        container.innerHTML = '<p class="empty-state">暂无训练历史记录</p>';
         return;
     }
-    
-    // 根据当前状态排序数据
-    const sortedData = sortHistoryData(historyData, historySortState.column, historySortState.direction);
 
-    // 创建表格结构
-    const table = document.createElement('table');
-    table.className = 'history-table';
-    
-    // 创建表头
-    table.innerHTML = `
-        <thead>
-            <tr>
-                ${createHeaderCell('model_name', '模型名称')}
-                ${createHeaderCell('final_accuracy', '最终准确率')}
-                ${createHeaderCell('training_duration_sec', '训练耗时(秒)')}
-                ${createHeaderCell('epochs', '轮数')}
-                ${createHeaderCell('learning_rate', '学习率')}
-                ${createHeaderCell('batch_size', '批次大小')}
-                ${createHeaderCell('completion_time', '完成时间')}
-            </tr>
-        </thead>
-    `;
+    // Sort data
+    const sortedData = sortHistoryData([...historyData], currentSort.column, currentSort.direction);
 
-    // 创建表格内容
-    const tbody = document.createElement('tbody');
+    let tableHTML = '<table class="history-table"><thead><tr>';
+    const headers = {
+        date: '训练日期',
+        model_name: '模型名称',
+        final_accuracy: '最终准确率',
+        epochs: '训练轮数',
+        learning_rate: '学习率',
+        batch_size: '批次大小',
+        duration: '训练耗时(秒)'
+    };
+
+    for (const key in headers) {
+        tableHTML += createHeaderCell(key, headers[key]);
+    }
+    tableHTML += '</tr></thead><tbody>';
+
     sortedData.forEach(record => {
-        const tr = document.createElement('tr');
-        const attentionBadge = record.has_attention ? '<span class="attention-badge-small">⚡</span>' : '';
-        tr.innerHTML = `
-            <td>${record.model_name || getModelName(record.model_id)} ${attentionBadge}</td>
-            <td>${(record.metrics.final_accuracy * 100).toFixed(2)}%</td>
-            <td>${record.metrics.training_duration_sec.toFixed(1)}</td>
-            <td>${record.hyperparameters.epochs}</td>
-            <td>${record.hyperparameters.learning_rate}</td>
-            <td>${record.hyperparameters.batch_size}</td>
-            <td>${formatDate(record.completion_time)}</td>
-        `;
-        tbody.appendChild(tr);
+        tableHTML += `<tr>
+            <td>${formatDate(record.date)}</td>
+            <td>${record.model_name}</td>
+            <td class="accuracy-cell">${(record.final_accuracy * 100).toFixed(2)}%</td>
+            <td>${record.epochs}</td>
+            <td>${record.learning_rate}</td>
+            <td>${record.batch_size}</td>
+            <td>${record.duration.toFixed(2)}s</td>
+        </tr>`;
     });
-    table.appendChild(tbody);
+
+    tableHTML += '</tbody></table>';
+    container.innerHTML = tableHTML;
     
-    // 渲染表格
-    container.innerHTML = '';
-    container.appendChild(table);
-    
-    // 绑定表头点击事件
-    const headers = container.querySelectorAll('th[data-sort-key]');
-    headers.forEach(header => {
-        header.addEventListener('click', () => {
-            const sortKey = header.dataset.sortKey;
-            handleSort(sortKey, historyData);
+    // Add event listeners to headers
+    container.querySelectorAll('.sortable').forEach(th => {
+        th.addEventListener('click', () => {
+            const sortKey = th.dataset.sort;
+            if (currentSort.column === sortKey) {
+                currentSort.direction = currentSort.direction === 'asc' ? 'desc' : 'asc';
+            } else {
+                currentSort.column = sortKey;
+                currentSort.direction = 'desc';
+            }
+            renderHistoryTable(historyData); // Re-render with new sort
         });
     });
-
-    console.log('📈 已渲染训练历史表格');
 }
 
-// 创建可排序的表头单元格
 function createHeaderCell(key, title) {
-    const isSorted = historySortState.column === key;
-    const sortIcon = isSorted ? (historySortState.direction === 'asc' ? '▲' : '▼') : '↕';
-    return `<th data-sort-key="${key}" class="${isSorted ? 'sorted' : ''}">${title} <span class="sort-icon">${sortIcon}</span></th>`;
+    let cell = `<th data-sort="${key}" class="sortable">`;
+    cell += title;
+    if (currentSort.column === key) {
+        cell += currentSort.direction === 'asc' ? ' ▲' : ' ▼';
+    }
+    cell += '</th>';
+    return cell;
 }
 
-// 处理排序逻辑
 function handleSort(sortKey, historyData) {
-    if (historySortState.column === sortKey) {
-        // 切换排序方向
-        historySortState.direction = historySortState.direction === 'asc' ? 'desc' : 'asc';
+    if (currentSort.column === sortKey) {
+        currentSort.direction = currentSort.direction === 'asc' ? 'desc' : 'asc';
     } else {
-        // 新的排序列，默认降序
-        historySortState.column = sortKey;
-        historySortState.direction = 'desc';
+        currentSort.column = sortKey;
+        currentSort.direction = 'desc';
     }
-    // 重新渲染表格
     renderHistoryTable(historyData);
 }
 
-// 排序数据
 function sortHistoryData(data, column, direction) {
-    return [...data].sort((a, b) => {
-        let valA, valB;
-
-        // 根据不同列获取值
-        switch (column) {
-            case 'model_name':
-                valA = a.model_name || getModelName(a.model_id);
-                valB = b.model_name || getModelName(b.model_id);
-                break;
-            case 'final_accuracy':
-                valA = a.metrics.final_accuracy;
-                valB = b.metrics.final_accuracy;
-                break;
-            case 'training_duration_sec':
-                valA = a.metrics.training_duration_sec;
-                valB = b.metrics.training_duration_sec;
-                break;
-            case 'epochs':
-                valA = a.hyperparameters.epochs;
-                valB = b.hyperparameters.epochs;
-                break;
-            case 'learning_rate':
-                valA = a.hyperparameters.learning_rate;
-                valB = b.hyperparameters.learning_rate;
-                break;
-            case 'batch_size':
-                valA = a.hyperparameters.batch_size;
-                valB = b.hyperparameters.batch_size;
-                break;
-            case 'completion_time':
-                valA = new Date(a.completion_time).getTime();
-                valB = new Date(b.completion_time).getTime();
-                break;
-            default:
-                return 0;
+    return data.sort((a, b) => {
+        let valA = a[column];
+        let valB = b[column];
+        
+        if (typeof valA === 'string' && column === 'date') {
+            valA = new Date(valA);
+            valB = new Date(valB);
         }
 
-        // 执行比较
         if (valA < valB) {
             return direction === 'asc' ? -1 : 1;
         }
@@ -724,48 +554,203 @@ function sortHistoryData(data, column, direction) {
     });
 }
 
-// 格式化日期
 function formatDate(dateString) {
+    if (!dateString) return 'N/A';
     const date = new Date(dateString);
-    if (isNaN(date)) return 'N/A';
-    
-    // 补零函数
     const pad = (num) => num.toString().padStart(2, '0');
-    
-    const year = date.getFullYear();
-    const month = pad(date.getMonth() + 1);
-    const day = pad(date.getDate());
-    const hours = pad(date.getHours());
-    const minutes = pad(date.getMinutes());
-    
-    return `${year}-${month}-${day} ${hours}:${minutes}`;
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
-// ==================== 模型对比页面 ====================
-/**
- * 渲染模型对比图表
- * @param {object} processedData - 经过处理用于图表的数据
- */
+// --- Comparison Charts ---
 export function renderComparisonCharts(processedData) {
-    if (!processedData || !processedData.labels || processedData.labels.length === 0) {
-        const container = document.getElementById('comparison-charts-container');
-        if (container) {
-            container.innerHTML = `<div class="empty-state">没有可用于对比的数据。请至少训练不同类型的模型各一次。</div>`;
-        }
+    if (!processedData || Object.keys(processedData).length === 0) {
+        console.warn("没有可用于对比的数据");
         return;
     }
+
+    const { labels, accuracy, duration, params, radarData } = processedData;
+
+    if (labels && labels.length > 0) {
+        ChartUtils.renderBarChart('accuracyBarChart', '最高准确率对比', labels, accuracy, 'rgba(75, 192, 192, 0.6)');
+        ChartUtils.renderBarChart('speedBarChart', '训练耗时对比 (秒)', labels, duration, 'rgba(255, 159, 64, 0.6)');
+        ChartUtils.renderBarChart('paramsBarChart', '模型参数量对比 (万)', labels, params.map(p => (p / 10000).toFixed(2)), 'rgba(153, 102, 255, 0.6)');
+        
+        if (radarData) {
+            ChartUtils.renderRadarChart('radarChart', radarData);
+        }
+    } else {
+        console.warn("处理后的对比数据中缺少标签");
+    }
+}
+
+
+// --- Misc UI Helpers ---
+export function populateModelSelector(models) {
+    const selector = document.getElementById('prediction-model-select');
+    if (!selector) return;
+    const selectedValue = selector.value;
+    selector.innerHTML = '<option value="">请选择模型</option>';
+    models.forEach(model => {
+        const option = document.createElement('option');
+        option.value = model.id;
+        option.textContent = model.name;
+        selector.appendChild(option);
+    });
+    selector.value = selectedValue;
+}
+
+export function handleCanvasUpdate(isEmpty) {
+    const predictBtn = document.getElementById('predict-btn');
+    if (predictBtn) {
+        const modelSelected = document.getElementById('prediction-model-select').value !== '';
+        predictBtn.disabled = isEmpty || !modelSelected;
+    }
+}
+
+export function renderPrediction(prediction, probabilities) {
+    // ...
+}
+
+export function clearPrediction() {
+    // ...
+}
+
+export function navigateTo(pageId) {
+    document.querySelectorAll('.page').forEach(page => page.classList.add('hidden'));
+    document.getElementById(pageId).classList.remove('hidden');
+}
+
+export function getSelectedModels() {
+    return Array.from(document.querySelectorAll('.model-checkbox:checked')).map(cb => cb.value);
+}
+
+export function getTrainingConfig() {
+    return {
+        epochs: document.getElementById('epochs-slider').value,
+        lr: document.getElementById('learning-rate-input').value,
+        batch_size: document.getElementById('batch-size-input').value,
+    };
+}
+
+export function showTrainingModal(selectedModels, config) {
+    let modelListHTML = selectedModels.map(id => `<li>${getModelName(id)}</li>`).join('');
     
-    // 渲染雷达图
-    ChartUtils.createRadarChart('radarChart', processedData.radarData);
+    const modalHTML = `
+        <div class="modal-backdrop">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>确认训练任务</h3>
+                    <button class="modal-close-btn">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <p>即将为以下模型启动训练：</p>
+                    <ul class="model-confirm-list">${modelListHTML}</ul>
+                    <hr>
+                    <p><strong>训练参数:</strong></p>
+                    <ul class="param-confirm-list">
+                        <li><strong>训练轮数:</strong> ${config.epochs}</li>
+                        <li><strong>学习率:</strong> ${config.lr}</li>
+                        <li><strong>批次大小:</strong> ${config.batch_size}</li>
+                    </ul>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn-secondary modal-cancel-btn">取消</button>
+                    <button class="btn-primary modal-confirm-btn">启动训练</button>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    document.body.insertAdjacentHTML('beforeend', modalHTML);
+    // Add event listeners for modal buttons
+    // ...
+}
 
-    // 渲染准确率柱状图
-    ChartUtils.createBarChart('accuracyBarChart', processedData.barData.accuracies, '最高准确率 (%)');
 
-    // 渲染速度柱状图
-    ChartUtils.createBarChart('speedBarChart', processedData.barData.speeds, '训练耗时 (秒)');
+export function updateTrainingProgress(jobId, modelId, progress) {
+    const progressItem = document.querySelector(`.progress-item[data-job-id="${jobId}"]`);
+    if (!progressItem) return;
 
-    // 渲染参数量柱状图
-    ChartUtils.createBarChart('paramsBarChart', processedData.barData.params, '模型参数量');
+    // ... Update progress bar, percentages, etc.
+    const statusEl = progressItem.querySelector('.status-text');
+    statusEl.textContent = getStatusMessage(progress.status);
+    progressItem.className = `progress-item status-${progress.status}`;
+}
 
-    console.log('📊 已渲染所有对比图表');
+export function showLoadingOverlay(text = '加载中...') {
+    if (loadingOverlay) {
+        loadingOverlayText.textContent = text;
+        loadingOverlay.classList.remove('hidden');
+    }
+    // 安全超时
+    setTimeout(() => {
+        hideLoadingOverlay();
+    }, 10000); // 10秒后自动隐藏，防止卡死
+}
+
+export function hideLoadingOverlay() {
+    if (loadingOverlay) {
+        loadingOverlay.classList.add('hidden');
+    }
+}
+
+export function showError(title, message) {
+    // Implement a more robust error display, e.g., a toast notification
+    alert(`${title}\n\n${message}`);
+}
+
+// 渲染概率分布图表
+function renderProbabilityChart(probabilities) {
+    const chartContainer = document.getElementById('prediction-chart');
+    if (!chartContainer) return;
+    
+    const ctx = chartContainer.getContext('2d');
+    
+    if (window.predictionChart instanceof Chart) {
+        window.predictionChart.destroy();
+    }
+
+    window.predictionChart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: Array.from(Array(10).keys()).map(String),
+            datasets: [{
+                label: '模型预测概率',
+                data: probabilities,
+                backgroundColor: 'rgba(75, 192, 192, 0.6)',
+                borderColor: 'rgba(75, 192, 192, 1)',
+                borderWidth: 1
+            }]
+        },
+        options: {
+            indexAxis: 'y',
+            scales: {
+                x: {
+                    beginAtZero: true,
+                    max: 1,
+                    ticks: { color: '#fff' }
+                },
+                y: {
+                    ticks: { color: '#fff' }
+                }
+            },
+            plugins: {
+                legend: {
+                    display: false
+                }
+            },
+            responsive: true,
+            maintainAspectRatio: false
+        }
+    });
+}
+
+function getStatusMessage(status) {
+    switch (status) {
+        case 'running': return '训练中...';
+        case 'queued': return '排队中';
+        case 'completed': return '完成';
+        case 'error': return '错误';
+        default: return '未知';
+    }
 }

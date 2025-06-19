@@ -1,7 +1,7 @@
 # Flask 应用主入口文件
 # 定义所有 API 路由
 
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, send_from_directory
 from flask_cors import CORS
 import os
 import uuid
@@ -12,6 +12,9 @@ import base64
 import io
 import numpy as np
 import json
+import re
+from datetime import datetime
+from werkzeug.utils import secure_filename
 
 # PyTorch and related imports
 import torch
@@ -29,6 +32,7 @@ except ImportError:
 
 # Project-specific imports
 from models import get_model_instance
+from core.persistence import PersistenceManager
 
 app = Flask(__name__)
 CORS(app)
@@ -40,8 +44,11 @@ app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 # 全局状态管理
 TRAINING_JOBS = {}
 LOADED_MODELS = {}
-TRAINING_EXECUTOR = ThreadPoolExecutor(max_workers=3)
+# 允许通过环境变量配置最大并发数，默认为5
+MAX_CONCURRENT_TRAINING_JOBS = int(os.environ.get('MAX_CONCURRENT_TRAINING_JOBS', 5))
+TRAINING_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_TRAINING_JOBS)
 TRAINING_LOCK = threading.Lock()
+PERSISTENCE_MANAGER = PersistenceManager()
 
 # 6个模型的配置信息
 AVAILABLE_MODELS = [
@@ -343,160 +350,141 @@ def find_optimal_batch_size(model, device, base_batch_size=64):
     return optimal_batch_size
 
 def perform_real_training(job_id, model_id, epochs, lr, batch_size):
-    """执行真实的模型训练
+    """执行真实的模型训练"""
+    train_start_time = time_module.time()
+    model = None
+    final_accuracy = 0.0
+    is_new_record = False
     
-    Args:
-        job_id: 训练任务ID
-        model_id: 模型ID
-        epochs: 训练轮数
-        lr: 学习率
-        batch_size: 批量大小
-    """
     try:
         print(f"🎯 开始真实训练: {model_id}")
         
-        # 1. 设备检测
+        # 1. 设备检测、数据加载等...
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print(f"🖥️ 使用设备: {device}")
-        
-        # 2. 数据加载
-        print("📊 加载MNIST数据集...")
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.1307,), (0.3081,))
-        ])
-        
+        transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
         train_dataset = datasets.MNIST('data', train=True, download=True, transform=transform)
         test_dataset = datasets.MNIST('data', train=False, transform=transform)
         
-        # 动态调整批量大小
         model_instance = get_model_instance(model_id)
         model_instance.to(device)
-        
         optimal_batch_size = find_optimal_batch_size(model_instance, device, batch_size)
-        print(f"📦 优化后批量大小: {optimal_batch_size}")
         
         train_loader = DataLoader(train_dataset, batch_size=optimal_batch_size, shuffle=True)
         test_loader = DataLoader(test_dataset, batch_size=optimal_batch_size, shuffle=False)
         
-        # 3. 模型、损失函数和优化器
         model = get_model_instance(model_id).to(device)
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=lr)
         
-        print(f"🧠 模型参数数量: {sum(p.numel() for p in model.parameters())}")
-        
-        # 4. 训练循环
         best_accuracy = 0.0
         
-        # 确保保存目录存在
-        save_dir = 'backend/saved_models'
-        os.makedirs(save_dir, exist_ok=True)
-        
+        # 2. 训练循环
         for epoch in range(epochs):
-            epoch_start_time = time_module.time()
-            
-            # 训练阶段
             model.train()
-            train_loss = 0.0
-            correct_train = 0
-            total_train = 0
-            
-            epoch_start = time_module.time()
+            batch_start_time = time_module.time()
             
             for batch_idx, (data, target) in enumerate(train_loader):
                 data, target = data.to(device), target.to(device)
-                
                 optimizer.zero_grad()
                 output = model(data)
                 loss = criterion(output, target)
                 loss.backward()
                 optimizer.step()
                 
-                train_loss += loss.item()
-                _, predicted = torch.max(output.data, 1)
-                total_train += target.size(0)
-                correct_train += (predicted == target).sum().item()
-                
-                # 更新进度
-                if batch_idx % 100 == 0:
-                    progress_percentage = (epoch * len(train_loader) + batch_idx) / (epochs * len(train_loader)) * 100
+                # 每50个批次更新一次进度
+                if batch_idx > 0 and batch_idx % 50 == 0:
+                    samples_processed = (batch_idx + 1) * optimal_batch_size
+                    time_elapsed = time_module.time() - batch_start_time
+                    samples_per_sec = samples_processed / time_elapsed
                     
                     with TRAINING_LOCK:
                         if job_id in TRAINING_JOBS:
                             TRAINING_JOBS[job_id]['progress'].update({
-                                'percentage': progress_percentage,
+                                'percentage': (epoch * len(train_loader) + batch_idx) / (epochs * len(train_loader)) * 100,
                                 'current_epoch': epoch + 1,
                                 'loss': loss.item(),
-                                'accuracy': correct_train / total_train
+                                'samples_per_sec': samples_per_sec,
                             })
+                            TRAINING_JOBS[job_id]['status'] = 'running' # 确保状态为 running
             
-            # 测试阶段
+            # ... (测试阶段代码保持不变) ...
             model.eval()
             test_loss = 0.0
-            correct_test = 0
-            total_test = 0
-            
+            correct = 0
             with torch.no_grad():
                 for data, target in test_loader:
                     data, target = data.to(device), target.to(device)
                     output = model(data)
                     test_loss += criterion(output, target).item()
-                    _, predicted = torch.max(output.data, 1)
-                    total_test += target.size(0)
-                    correct_test += (predicted == target).sum().item()
+                    pred = output.argmax(dim=1, keepdim=True)
+                    correct += pred.eq(target.view_as(pred)).sum().item()
             
-            # 计算准确率
-            train_accuracy = correct_train / total_train
-            test_accuracy = correct_test / total_test
-            epoch_time = time_module.time() - epoch_start
-            
-            print(f"📈 Epoch {epoch+1}/{epochs}:")
-            print(f"   训练损失: {train_loss/len(train_loader):.4f}, 训练准确率: {train_accuracy:.4f}")
-            print(f"   测试损失: {test_loss/len(test_loader):.4f}, 测试准确率: {test_accuracy:.4f}")
-            print(f"   耗时: {epoch_time:.2f}秒")
-            
-            # 更新最佳准确率并保存模型
+            test_accuracy = correct / len(test_loader.dataset)
             if test_accuracy > best_accuracy:
                 best_accuracy = test_accuracy
-                
-                # 保存最佳模型
-                save_success = save_model_with_replacement(model, model_id, test_accuracy, save_dir, job_id)
-                if save_success:
-                    print(f"🎉 新的最佳模型! 准确率: {test_accuracy:.4f}")
-            
-            # 更新训练进度
+                is_new_record = PERSISTENCE_MANAGER.save_checkpoint(model, model_id, job_id, epoch, best_accuracy)
+
             with TRAINING_LOCK:
-                if job_id in TRAINING_JOBS:
+                 if job_id in TRAINING_JOBS:
                     TRAINING_JOBS[job_id]['progress'].update({
                         'percentage': ((epoch + 1) / epochs) * 100,
                         'current_epoch': epoch + 1,
                         'accuracy': test_accuracy,
-                        'loss': test_loss / len(test_loader),
-                        'best_accuracy': best_accuracy
+                        'best_accuracy': best_accuracy,
                     })
-        
-        # 训练完成
+
+        final_accuracy = best_accuracy
         with TRAINING_LOCK:
             if job_id in TRAINING_JOBS:
                 TRAINING_JOBS[job_id]['status'] = 'completed'
                 TRAINING_JOBS[job_id]['end_time'] = time_module.time()
-                TRAINING_JOBS[job_id]['progress']['percentage'] = 100
-        
-        print(f"🎊 训练完成! 最佳准确率: {best_accuracy:.4f}")
         
     except Exception as e:
-        error_message = f"训练过程出错: {str(e)}"
-        print(f"❌ {error_message}")
-        
-        # 更新错误状态
         with TRAINING_LOCK:
             if job_id in TRAINING_JOBS:
                 TRAINING_JOBS[job_id]['status'] = 'error'
-                TRAINING_JOBS[job_id]['error_message'] = error_message
+                TRAINING_JOBS[job_id]['error_message'] = str(e)
                 TRAINING_JOBS[job_id]['end_time'] = time_module.time()
-        
-        raise e
+    
+    finally:
+        # 3. 无论成功失败，都记录到历史档案
+        training_duration = time_module.time() - train_start_time
+        history_entry = {
+            "job_id": job_id,
+            "model_id": model_id,
+            "model_name": get_model_display_info(model_id).get('name', model_id),
+            "has_attention": get_model_display_info(model_id).get('has_attention', False),
+            "status": TRAINING_JOBS.get(job_id, {}).get('status', 'unknown'),
+            "start_time": train_start_time,
+            "completion_time": time_module.time(),
+            "hyperparameters": {
+                "epochs": epochs,
+                "learning_rate": lr,
+                "batch_size": batch_size
+            },
+            "metrics": {
+                "final_accuracy": final_accuracy,
+                "training_duration_sec": training_duration,
+                "is_new_record": is_new_record,
+                "total_params": sum(p.numel() for p in model.parameters()) if model else 0
+            },
+            "error_message": TRAINING_JOBS.get(job_id, {}).get('error_message')
+        }
+        PERSISTENCE_MANAGER.append_training_history(history_entry)
+        print(f"H️⃣ 训练历史已存档: {job_id}")
+
+@app.route('/api/training_history', methods=['GET'])
+def get_training_history():
+    """提供所有训练历史记录的接口"""
+    try:
+        history = PERSISTENCE_MANAGER.get_training_history()
+        # 将时间戳转换为更易读的ISO 8601格式字符串
+        for record in history:
+            record['start_time_iso'] = datetime.fromtimestamp(record['start_time']).isoformat()
+            record['completion_time_iso'] = datetime.fromtimestamp(record['completion_time']).isoformat()
+        return jsonify(history)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/training_progress', methods=['GET'])
 def get_training_progress():
@@ -508,17 +496,18 @@ def get_training_progress():
         
         job_list = [job_id.strip() for job_id in job_ids.split(',')]
         
-        progress_data = {}
+        progress_list = []
         
         with TRAINING_LOCK:
             for job_id in job_list:
                 if job_id in TRAINING_JOBS:
                     job_info = TRAINING_JOBS[job_id].copy()
-                    progress_data[job_id] = job_info
+                    progress_list.append(job_info)
                 else:
                     return jsonify({"error": f"训练任务 {job_id} 不存在"}), 404
         
-        return jsonify(progress_data)
+        # 返回前端期望的格式
+        return jsonify({"progress": progress_list})
         
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -563,22 +552,36 @@ def scan_trained_models():
         
         for filename in model_files:
             try:
-                # 解析文件名格式: {model_id}_best_acc_{accuracy:.4f}.pth
-                if '_best_acc_' not in filename:
+                # 方案2：打造一个能同时处理新旧两种命名格式的智能解析器
+                # 正则表达式能像精确制导一样，从复杂文件名中提取所需信息
+                # 模式解释:
+                #   - r'...' : Python中的原生字符串，避免反斜杠问题
+                #   - _(?:best_)?acc_ : 这是一个非捕获组 (?:...)，匹配 "_acc_" 或 "_best_acc_"
+                #                      "best_" 部分是可选的 (?)
+                delimiter_pattern = r'_(?:best_)?acc_'
+                parts = re.split(delimiter_pattern, filename)
+
+                model_id = ""
+                accuracy = 0.0
+
+                if len(parts) == 2:
+                    # 匹配成功，例如 "cnn_attention_best_acc_0.9947.pth"
+                    # parts 会是 ['cnn_attention', '0.9947.pth']
+                    model_id = parts[0]
+                    accuracy = float(parts[1].replace('.pth', ''))
+                elif len(parts) == 1:
+                    # 无法用精度分割，说明可能是 "mlp.pth" 这样的简单格式
+                    model_id = filename.replace('.pth', '')
+                    accuracy = 0.0  # 给予一个默认值，表示精度未知
+                else:
+                    # 格式无法识别，跳过
+                    print(f"⚠️ 文件名格式无法识别，已跳过: {filename}")
                     continue
-                    
-                # 找到最后一个 '_best_acc_' 来正确分割文件名
-                last_acc_index = filename.rfind('_best_acc_')
-                if last_acc_index == -1:
-                    continue
-                
-                model_id = filename[:last_acc_index]
-                accuracy_part = filename[last_acc_index + len('_best_acc_'):].replace('.pth', '')
-                accuracy = float(accuracy_part)
-                
+
                 # 获取模型显示名称和信息
                 model_info = get_model_display_info(model_id)
                 if not model_info:
+                    print(f"⚠️ 未找到模型 '{model_id}' 的配置信息，已跳过: {filename}")
                     continue
                 
                 # 获取文件信息
@@ -706,20 +709,22 @@ def load_model_for_prediction(model_id):
             print(f"❌ 模型文件不存在: {model_path}")
             return None
         
-        # 解析模型类型
-        model_type = model_id.split('_best_acc_')[0]
+        # 使用与 scan_trained_models 中相同的强大解析逻辑
+        delimiter_pattern = r'_(?:best_)?acc_'
+        parts = re.split(delimiter_pattern, model_id)
+        model_type = parts[0]
         
         print(f"🔄 加载模型: {model_type} 从 {model_path}")
         
         # 创建模型实例
-        model = get_model_instance(model_type)
+        model_instance = get_model_instance(model_type)
         
         # 加载权重
         checkpoint = torch.load(model_path, map_location='cpu')
-        model.load_state_dict(checkpoint)
+        model_instance.load_state_dict(checkpoint)
         
         # 设置为评估模式
-        model.eval()
+        model_instance.eval()
         
         # 缓存模型（限制缓存数量避免内存过多）
         if len(LOADED_MODELS) >= 5:  # 最多缓存5个模型
@@ -728,10 +733,10 @@ def load_model_for_prediction(model_id):
             del LOADED_MODELS[oldest_key]
             print(f"🗑️ 删除缓存模型: {oldest_key}")
         
-        LOADED_MODELS[model_id] = model
+        LOADED_MODELS[model_id] = model_instance
         print(f"✅ 模型加载成功并缓存: {model_id}")
         
-        return model
+        return model_instance
         
     except Exception as e:
         print(f"❌ 加载模型失败 {model_id}: {e}")
@@ -817,32 +822,6 @@ def perform_inference(model, input_tensor):
     except Exception as e:
         print(f"❌ 模型推理失败: {e}")
         raise e
-
-@app.route('/api/history', methods=['GET'])
-def get_training_history():
-    """获取训练历史记录"""
-    try:
-        # 返回最近的训练任务记录
-        with TRAINING_LOCK:
-            history = []
-            for job_id, job_info in TRAINING_JOBS.items():
-                history.append({
-                    "job_id": job_id,
-                    "model_id": job_info['model_id'],
-                    "status": job_info['status'],
-                    "start_time": job_info['start_time'],
-                    "end_time": job_info.get('end_time'),
-                    "final_accuracy": job_info['progress'].get('best_accuracy', 0.0),
-                    "config": job_info['config']
-                })
-            
-            # 按开始时间降序排序
-            history.sort(key=lambda x: x['start_time'], reverse=True)
-            
-            return jsonify(history)
-        
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 def check_system_health():
     """检查系统健康状态"""

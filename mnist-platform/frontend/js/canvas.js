@@ -98,7 +98,8 @@ export function init(onCanvasChange) {
 
     // 初始清空并设置背景
     clearCanvas(true); // 传入true表示不触发回调
-    console.log('🎨 Canvas 绘制模块已加载');
+    console.log('�� Canvas 绘制模块已加载');
+    return true; // 明确返回true，表示初始化成功
 }
 
 /**
