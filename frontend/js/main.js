@@ -3,6 +3,7 @@ import * as API from './api.js';
 import { init as initCanvas, getImageData, clearCanvas } from './canvas.js';
 import * as UI from './ui.js';
 import * as ChartUtils from './chart_utils.js';
+import { getModelName } from './ui.js';
 
 // 全局应用状态
 const AppState = {
@@ -388,90 +389,115 @@ async function handlePrediction() {
     }
 }
 
+/**
+ * 归一化处理"值越小越好"的指标（如：耗时、参数量）
+ * @param {number} value - 当前值
+ * @param {number} maxValue - 所有值中的最大值
+ * @returns {number} 0到1之间的归一化分数
+ */
+function normalizeInverseMetric(value, maxValue) {
+    if (maxValue === 0) {
+        return 1; // 如果最大值是0，说明已经达到最佳，给满分
+    }
+    return 1 - (value / maxValue);
+}
+
 // 为模型对比图表处理数据
-// 从所有历史记录中，为每种模型找出最佳准确率的记录
+// 从所有历史记录中，为每种模型找出最佳准确率的记录，并格式化为图表所需数据
 function processDataForComparison(historyData) {
     const bestRecords = {};
 
+    // 1. 找出每个模型类型的最佳记录
     historyData.forEach(record => {
-        const modelType = record.model_name.split(' ')[0]; // e.g., "CNN" from "CNN with Attention"
-        const recordAccuracy = record.metrics.final_accuracy;
-
-        if (!bestRecords[modelType] || recordAccuracy > bestRecords[modelType].metrics.final_accuracy) {
-            bestRecords[modelType] = record;
+        const modelId = record.model_id;
+        if (!bestRecords[modelId] || record.metrics.final_accuracy > bestRecords[modelId].metrics.final_accuracy) {
+            bestRecords[modelId] = record;
         }
     });
 
     const models = Object.values(bestRecords);
-    const labels = models.map(m => {
-        const modelName = m.model_name || UI.getModelName(m.model_id);
-        return m.has_attention ? `${modelName} ⚡` : modelName;
-    });
-
-    // 为雷达图归一化数据
+    if (models.length === 0) {
+        return null;
+    }
+    
+    // 2. 提取并格式化用于柱状图和雷达图的数据
+    const labels = models.map(m => getModelName(m.model_id));
     const accuracies = models.map(m => m.metrics.final_accuracy);
     const speeds = models.map(m => m.metrics.training_duration_sec);
     const params = models.map(m => m.metrics.total_params);
 
+    const barData = {
+        accuracies: {
+            labels,
+            datasets: [{ label: '最高准确率', data: accuracies.map(a => a * 100), backgroundColor: 'rgba(75, 192, 192, 0.6)' }]
+        },
+        speeds: {
+            labels,
+            datasets: [{ label: '训练耗时 (秒)', data: speeds, backgroundColor: 'rgba(255, 159, 64, 0.6)' }]
+        },
+        params: {
+            labels,
+            datasets: [{ label: '模型参数量', data: params, backgroundColor: 'rgba(153, 102, 255, 0.6)' }]
+        }
+    };
+    
+    // 3. 为雷达图归一化数据
+    const radarLabels = ['准确性', '效率 (速度)', '简洁性 (参数)'];
     const maxSpeed = Math.max(...speeds);
     const maxParams = Math.max(...params);
 
-    // 速度越快越好（值越小越好），所以用 1 - normalized
-    const normalizedSpeeds = speeds.map(s => 1 - (s / maxSpeed));
-    // 参数越少越好（值越小越好），所以用 1 - normalized
-    const normalizedParams = params.map(p => 1 - (p / maxParams));
-
-    // 简单的平均值计算函数
-    const simpleMean = (arr) => arr.length > 0 ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
-
-    return {
-        labels: labels,
-        radarData: {
-            labels: ['准确性', '效率 (速度)', '简洁性 (参数)'],
-            datasets: [{
-                label: '综合性能',
-                data: [
-                    simpleMean(accuracies), 
-                    simpleMean(normalizedSpeeds),
-                    simpleMean(normalizedParams)
-                ],
+    const radarData = {
+        labels: radarLabels,
+        datasets: models.map((model, index) => {
+            const color = CHART_COLORS[index % CHART_COLORS.length];
+            const normalizedAcc = model.metrics.final_accuracy;
+            const normalizedSpeed = normalizeInverseMetric(model.metrics.training_duration_sec, maxSpeed);
+            const normalizedParams = normalizeInverseMetric(model.metrics.total_params, maxParams);
+            return {
+                label: getModelName(model.model_id),
+                data: [normalizedAcc, normalizedSpeed, normalizedParams],
                 fill: true,
-                backgroundColor: 'rgba(54, 162, 235, 0.2)',
-                borderColor: 'rgb(54, 162, 235)',
-                pointBackgroundColor: 'rgb(54, 162, 235)',
-                pointBorderColor: '#fff',
-                pointHoverBackgroundColor: '#fff',
-                pointHoverBorderColor: 'rgb(54, 162, 235)'
-            }]
-        },
-        barData: {
-            accuracies: {
-                labels,
-                datasets: [{
-                    label: '最高准确率',
-                    data: accuracies.map(a => a * 100), // 转为百分比
-                    backgroundColor: 'rgba(75, 192, 192, 0.6)',
-                }]
-            },
-            speeds: {
-                labels,
-                datasets: [{
-                    label: '训练耗时 (秒)',
-                    data: speeds,
-                    backgroundColor: 'rgba(255, 159, 64, 0.6)',
-                }]
-            },
-            params: {
-                labels,
-                datasets: [{
-                    label: '模型参数量',
-                    data: params,
-                    backgroundColor: 'rgba(153, 102, 255, 0.6)',
-                }]
-            }
-        }
+                backgroundColor: `rgba(${color}, 0.2)`,
+                borderColor: `rgb(${color})`,
+                pointBackgroundColor: `rgb(${color})`,
+            };
+        })
     };
+
+    // 4. 提取并格式化用于折线图的数据
+    const modelsForLineChart = models.filter(
+        m => m.metrics && Array.isArray(m.metrics.epoch_metrics) && m.metrics.epoch_metrics.length > 0
+    );
+
+    let lineChartData = { labels: [], datasets: [] }; // 默认空结构，确保安全
+
+    if (modelsForLineChart.length > 0) {
+        const maxEpochs = Math.max(...modelsForLineChart.map(m => m.metrics.epoch_metrics.length));
+        const epochLabels = Array.from({ length: maxEpochs }, (_, i) => `Epoch ${i + 1}`);
+        
+        lineChartData = {
+            labels: epochLabels,
+            datasets: modelsForLineChart.map((model, index) => {
+                const color = CHART_COLORS[index % CHART_COLORS.length];
+                return {
+                    label: `${getModelName(model.model_id)} 验证准确率`,
+                    data: model.metrics.epoch_metrics.map(e => e.val_accuracy),
+                    borderColor: `rgb(${color})`,
+                    backgroundColor: `rgba(${color}, 0.5)`,
+                    tension: 0.1
+                };
+            })
+        };
+    }
+
+    return { barData, radarData, lineChartData };
 }
+
+// 帮助渲染的颜色
+const CHART_COLORS = [
+    '75, 192, 192', '255, 99, 132', '255, 205, 86', 
+    '54, 162, 235', '153, 102, 255', '255, 159, 64'
+];
 
 // 导出状态（用于调试）
 window.AppState = AppState;

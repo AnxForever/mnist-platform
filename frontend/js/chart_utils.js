@@ -107,3 +107,56 @@ export function createBarChart(chartId, data, title) {
     });
     console.log(`📊 已创建柱状图: ${title}`);
 }
+
+/**
+ * 创建或更新折线图
+ * @param {string} chartId - canvas元素的ID
+ * @param {object} data - 图表数据，包含 labels 和 datasets
+ * @param {string} title - 图表标题
+ */
+export function createLineChart(chartId, data, title) {
+    const ctx = document.getElementById(chartId);
+    if (!ctx) {
+        console.error(`❌ 未找到ID为 '${chartId}' 的Canvas元素`);
+        return;
+    }
+    
+    destroyChart(chartId); // 先销毁旧图表
+
+    chartInstances[chartId] = new Chart(ctx, {
+        type: 'line',
+        data: data,
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    position: 'top',
+                },
+                title: {
+                    display: true,
+                    text: title,
+                    font: {
+                        size: 16
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    title: {
+                        display: true,
+                        text: '训练轮次 (Epoch)'
+                    }
+                },
+                y: {
+                    beginAtZero: true,
+                    title: {
+                        display: true,
+                        text: '准确率'
+                    }
+                }
+            }
+        }
+    });
+    console.log(`📊 已创建折线图: ${title}`);
+}

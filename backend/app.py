@@ -56,7 +56,8 @@ LOADED_MODELS = {}
 MAX_CONCURRENT_TRAINING_JOBS = int(os.environ.get('MAX_CONCURRENT_TRAINING_JOBS', 5))
 TRAINING_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_TRAINING_JOBS)
 TRAINING_LOCK = threading.Lock()
-PERSISTENCE_MANAGER = PersistenceManager()
+# 将持久化目录固定到 backend 目录，防止不同启动路径导致的文件丢失
+PERSISTENCE_MANAGER = PersistenceManager(APP_DIR)
 
 # 6个模型的配置信息
 AVAILABLE_MODELS = [
@@ -152,6 +153,7 @@ def start_training():
                     "accuracy": 0.0,
                     "loss": 0.0,
                     "best_accuracy": 0.0,
+                    "samples_per_second": 0,
                     "historical_best_accuracy": 0.0,
                     "is_first_training": True
                 },
@@ -407,31 +409,33 @@ def perform_real_training(job_id, model_id, epochs, lr, batch_size):
         # 2. 训练循环
         for epoch in range(epochs):
             model.train()
-            batch_start_time = time_module.time()
-            
-            for batch_idx, (data, target) in enumerate(train_loader):
-                data, target = data.to(device), target.to(device)
+            running_loss = 0.0
+            for i, (images, labels) in enumerate(train_loader):
+                batch_start_time = time_module.time()
+
+                images, labels = images.to(device), labels.to(device)
+                
+                # 前向传播、计算损失、反向传播和优化
                 optimizer.zero_grad()
-                output = model(data)
-                loss = criterion(output, target)
+                outputs = model(images)
+                loss = criterion(outputs, labels)
                 loss.backward()
                 optimizer.step()
                 
-                # 每50个批次更新一次进度
-                if batch_idx > 0 and batch_idx % 50 == 0:
-                    samples_processed = (batch_idx + 1) * optimal_batch_size
-                    time_elapsed = time_module.time() - batch_start_time
-                    samples_per_sec = samples_processed / time_elapsed
-                    
-                    with TRAINING_LOCK:
-                        if job_id in TRAINING_JOBS:
-                            TRAINING_JOBS[job_id]['progress'].update({
-                                'percentage': (epoch * len(train_loader) + batch_idx) / (epochs * len(train_loader)) * 100,
-                                'current_epoch': epoch + 1,
-                                'loss': loss.item(),
-                                'samples_per_sec': samples_per_sec,
-                            })
-                            TRAINING_JOBS[job_id]['status'] = 'running' # 确保状态为 running
+                running_loss += loss.item()
+
+                batch_end_time = time_module.time()
+                batch_duration = batch_end_time - batch_start_time
+                samples_per_second = len(images) / batch_duration if batch_duration > 0 else 0
+                
+                # 更新全局状态
+                with TRAINING_LOCK:
+                    if job_id in TRAINING_JOBS:
+                        progress_data = TRAINING_JOBS[job_id]['progress']
+                        progress_data['percentage'] = min(100, int(((epoch * len(train_loader) + i + 1) / (epochs * len(train_loader))) * 100))
+                        progress_data['current_epoch'] = epoch + 1
+                        progress_data['loss'] = loss.item()
+                        progress_data['samples_per_second'] = samples_per_second
             
             # ... (测试阶段代码保持不变) ...
             model.eval()
@@ -503,7 +507,7 @@ def perform_real_training(job_id, model_id, epochs, lr, batch_size):
         # 保存最佳模型
         if best_accuracy > historical_best_accuracy:
             print(f"🎉 新纪录! 准确率从 {historical_best_accuracy:.4f} 提升到 {best_accuracy:.4f}。正在保存模型...")
-            save_model_with_replacement(model.state_dict(), model_id, best_accuracy, SAVED_MODELS_DIR, job_id)
+            save_model_with_replacement(model, model_id, best_accuracy, SAVED_MODELS_DIR, job_id)
         else:
             print(f"👍 训练完成，但未超越历史最佳准确率({historical_best_accuracy:.4f})")
 

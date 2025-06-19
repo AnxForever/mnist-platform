@@ -169,7 +169,7 @@ function createProgressBar(job) {
 }
 
 // 获取模型显示名称
-function getModelName(modelId) {
+export function getModelName(modelId) {
     const modelMap = {
         'mlp': 'MLP',
         'cnn': 'CNN', 
@@ -637,29 +637,32 @@ function formatDate(dateString) {
 
 // --- Comparison Charts ---
 export function renderComparisonCharts(processedData) {
-    if (!processedData || !processedData.barData || !processedData.barData.accuracies) {
+    if (!processedData) {
         console.warn("没有可用于对比的有效数据");
-        // 可以考虑在这里清空或隐藏旧的图表
+        // 这里可以添加隐藏或清空旧图表的逻辑
         return;
     }
 
-    const { barData, radarData } = processedData;
+    const { barData, radarData, lineChartData } = processedData;
 
-    // 1. 渲染准确率对比图
-    ChartUtils.createBarChart('accuracyBarChart', barData.accuracies, '最高准确率对比');
+    // 1. 渲染三张柱状图
+    if (barData) {
+        ChartUtils.createBarChart('accuracyBarChart', barData.accuracies, '最高准确率对比');
+        ChartUtils.createBarChart('speedBarChart', barData.speeds, '训练耗时对比 (秒)');
+        
+        const paramsData = JSON.parse(JSON.stringify(barData.params));
+        paramsData.datasets[0].data = paramsData.datasets[0].data.map(p => (p / 10000).toFixed(2));
+        ChartUtils.createBarChart('paramsBarChart', paramsData, '模型参数量对比 (万)');
+    }
 
-    // 2. 渲染训练速度对比图
-    ChartUtils.createBarChart('speedBarChart', barData.speeds, '训练耗时对比 (秒)');
-
-    // 3. 渲染模型参数量对比图
-    // 我们需要将参数量从个位数转换为"万"为单位
-    const paramsData = JSON.parse(JSON.stringify(barData.params)); // 深拷贝以避免修改原始数据
-    paramsData.datasets[0].data = paramsData.datasets[0].data.map(p => (p / 10000).toFixed(2));
-    ChartUtils.createBarChart('paramsBarChart', paramsData, '模型参数量对比 (万)');
-
-    // 4. 渲染雷达图
+    // 2. 渲染雷达图
     if (radarData) {
         ChartUtils.createRadarChart('radarChart', radarData);
+    }
+
+    // 3. 渲染学习曲线图
+    if (lineChartData) {
+        ChartUtils.createLineChart('learningCurveChart', lineChartData, '学习曲线对比 (验证集准确率)');
     }
 }
 
