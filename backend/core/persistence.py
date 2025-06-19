@@ -4,18 +4,28 @@ import os
 import threading
 import torch
 import time
+from datetime import datetime
 
 # 全局锁，保护文件写操作
 FILE_LOCK = threading.Lock()
 
 class PersistenceManager:
-    """持久化管理器 - 负责模型和历史数据的存储"""
-    
-    def __init__(self, base_dir="."):
+    """
+    负责所有与文件系统相关的持久化操作，例如保存和加载训练历史。
+    这个类的目标是集中管理所有I/O操作，使其更加健壮和易于维护。
+    """
+    def __init__(self, base_dir, lock):
+        """
+        初始化持久化管理器。
+        Args:
+            base_dir (str): 所有持久化文件的根目录。
+            lock (threading.Lock): 用于同步文件访问的线程锁。
+        """
         self.base_dir = base_dir
         self.models_dir = os.path.join(base_dir, "saved_models")
         self.checkpoints_dir = os.path.join(base_dir, "checkpoints")
         self.history_file = os.path.join(base_dir, "training_history.json")
+        self.lock = lock
         
         # 确保目录存在
         os.makedirs(self.models_dir, exist_ok=True)
@@ -56,29 +66,50 @@ class PersistenceManager:
         model.eval()
         return model
     
-    def append_training_history(self, history_entry):
-        """追加训练历史记录"""
-        with FILE_LOCK:
-            # 读取现有历史
-            history = self.get_training_history()
-            
-            # 添加新记录
-            history.append(history_entry)
-            
-            # 写回文件
-            with open(self.history_file, 'w', encoding='utf-8') as f:
-                json.dump(history, f, indent=2, ensure_ascii=False)
+    def save_training_history(self, new_entry):
+        """
+        以线程安全的方式，将一条新的训练记录追加到历史文件中。
+        """
+        with self.lock:
+            try:
+                # 1. 读取现有数据
+                if os.path.exists(self.history_file) and os.path.getsize(self.history_file) > 0:
+                    with open(self.history_file, 'r', encoding='utf-8') as f:
+                        history = json.load(f)
+                else:
+                    history = []
+                
+                # 2. 追加新记录
+                history.append(new_entry)
+                
+                # 3. 写回文件
+                with open(self.history_file, 'w', encoding='utf-8') as f:
+                    json.dump(history, f, ensure_ascii=False, indent=2)
+                
+                print(f"💾 训练历史已保存, Job ID: {new_entry.get('job_id')}")
+
+            except (IOError, json.JSONDecodeError) as e:
+                print(f"❌ 保存训练历史失败: {e}")
     
-    def get_training_history(self):
-        """获取所有训练历史记录"""
-        if not os.path.exists(self.history_file):
-            return []
-        
-        try:
-            with open(self.history_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (json.JSONDecodeError, FileNotFoundError):
-            return []
+    def load_training_history(self):
+        """
+        以线程安全的方式，从文件加载完整的训练历史。
+        """
+        with self.lock:
+            try:
+                if not os.path.exists(self.history_file):
+                    return []
+                
+                with open(self.history_file, 'r', encoding='utf-8') as f:
+                    # 添加一个检查，如果文件为空，则返回空列表，防止json.load抛出异常
+                    content = f.read()
+                    if not content:
+                        return []
+                    return json.loads(content)
+            
+            except (IOError, json.JSONDecodeError) as e:
+                print(f"❌ 加载训练历史失败: {e}")
+                return []
     
     def get_saved_models(self):
         """获取所有已保存的模型文件信息"""

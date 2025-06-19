@@ -50,17 +50,17 @@ export async function getTrainedModels() {
 }
 
 // 执行手写识别预测
-export async function predict(modelId, imageBase64) {
+export async function predict(data) {
     return fetch(`${API_BASE_URL}/predict`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model_id: modelId, image_base64: imageBase64 }),
+        body: JSON.stringify(data),
     }).then(handleResponse);
 }
 
 // 获取训练历史记录
 export async function getTrainingHistory() {
-    return fetch(`${API_BASE_URL}/training_history`).then(handleResponse);
+    return fetch(`${API_BASE_URL}/history`).then(handleResponse);
 }
 
 export async function cancelTraining(jobId) {

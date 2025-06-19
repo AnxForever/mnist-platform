@@ -56,8 +56,8 @@ LOADED_MODELS = {}
 MAX_CONCURRENT_TRAINING_JOBS = int(os.environ.get('MAX_CONCURRENT_TRAINING_JOBS', 5))
 TRAINING_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_TRAINING_JOBS)
 TRAINING_LOCK = threading.Lock()
-# 将持久化目录固定到 backend 目录，防止不同启动路径导致的文件丢失
-PERSISTENCE_MANAGER = PersistenceManager(APP_DIR)
+# 将持久化目录固定到 backend 目录，并将锁注入管理器
+PERSISTENCE_MANAGER = PersistenceManager(APP_DIR, lock=TRAINING_LOCK)
 
 # 6个模型的配置信息
 AVAILABLE_MODELS = [
@@ -104,6 +104,14 @@ AVAILABLE_MODELS = [
         "parameter_count": 134792
     }
 ]
+
+# 新增工具函数，方便通过ID查找名称
+def get_model_name_by_id(model_id):
+    """根据模型ID获取模型显示名称"""
+    for model in AVAILABLE_MODELS:
+        if model['id'] == model_id:
+            return model['name']
+    return model_id # 如果没找到，返回原始ID
 
 @app.route('/api/status', methods=['GET'])
 def get_status():
@@ -187,15 +195,42 @@ def safe_training_wrapper(job_id, model_id, epochs, lr, batch_size):
         print(f"🚀 启动训练任务 {job_id}：模型 {model_id}, Epochs: {epochs}, LR: {lr}, Batch Size: {batch_size}")
         
         # 更新状态为运行中
+        job_info = None
         with TRAINING_LOCK:
             if job_id in TRAINING_JOBS:
-                TRAINING_JOBS[job_id]['status'] = 'running'
-                TRAINING_JOBS[job_id]['start_time'] = time_module.time()
+                job_info = TRAINING_JOBS[job_id]
+                job_info['status'] = 'running'
+                job_info['start_time'] = time_module.time()
         
-        # 执行真实训练
-        perform_real_training(job_id, model_id, epochs, lr, batch_size)
+        # 执行真实训练并捕获其返回的完整结果
+        results = perform_real_training(job_id, model_id, epochs, lr, batch_size)
         
-        print(f"✅ 训练任务 {job_id} 成功完成")
+        # 准备用于持久化的历史记录条目 - 完全按照前端ui.js的需求来构建
+        end_time = time_module.time()
+        start_time = job_info.get('start_time', end_time)
+
+        history_entry = {
+            "job_id": job_id,
+            "model_id": model_id,
+            "model_name": get_model_name_by_id(model_id),
+            "status": "completed",
+            "timestamp": datetime.fromtimestamp(end_time).isoformat(), # 前端需要 timestamp
+            "config": job_info.get('config', {}),
+            
+            # --- 直接暴露在顶层的指标 ---
+            "best_accuracy": results.get('best_accuracy', 0.0), # 原始准确率 (0.0 to 1.0)
+            "final_loss": results.get('final_loss', 0.0),
+            "samples_per_second": results.get('samples_per_second', 0),
+            "model_params": results.get('model_params', 0),
+            "duration_seconds": end_time - start_time, # 前端需要 duration_seconds
+
+            "epoch_metrics": results.get('epoch_metrics', []),
+            "error_message": None
+        }
+
+        PERSISTENCE_MANAGER.save_training_history(history_entry)
+        
+        print(f"✅ 训练任务 {job_id} 成功完成，结果已按照前端格式保存。")
         
     except Exception as e:
         error_message = f"训练失败: {str(e)}"
@@ -362,7 +397,7 @@ def find_optimal_batch_size(model, device, base_batch_size=64):
     return optimal_batch_size
 
 def perform_real_training(job_id, model_id, epochs, lr, batch_size):
-    """执行真实的模型训练过程"""
+    """执行实际的模型训练，并在完成后返回一个包含所有结果的字典。"""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"🔩 使用设备: {device}")
 
@@ -482,7 +517,7 @@ def perform_real_training(job_id, model_id, epochs, lr, batch_size):
         history_entry = {
             "job_id": job_id,
             "model_id": model_id,
-            "model_name": get_model_display_info(model_id).get('name', model_id),
+            "model_name": get_model_name_by_id(model_id),
             "has_attention": get_model_display_info(model_id).get('has_attention', False),
             "status": TRAINING_JOBS.get(job_id, {}).get('status', 'unknown'),
             "start_time": train_start_time,
@@ -511,39 +546,30 @@ def perform_real_training(job_id, model_id, epochs, lr, batch_size):
         else:
             print(f"👍 训练完成，但未超越历史最佳准确率({historical_best_accuracy:.4f})")
 
-@app.route('/api/training_history', methods=['GET'])
+        # 返回包含所有需要信息的字典
+        return {
+            "best_accuracy": round(best_accuracy, 4),
+            "final_loss": round(test_loss, 5),
+            "total_time": training_duration,
+            "samples_per_second": samples_per_second,
+            "model_params": sum(p.numel() for p in model.parameters()) if model else 0
+        }
+
+@app.route('/api/history', methods=['GET'])
 def get_training_history():
-    """提供所有训练历史记录的接口"""
+    """获取所有已完成的训练历史记录"""
     try:
-        history = PERSISTENCE_MANAGER.get_training_history()
-        
-        # 数据清洗和增强：确保每条记录都有可用的时长和ISO格式时间
+        history = PERSISTENCE_MANAGER.load_training_history()
+        # 在返回之前，为每条记录添加 model_name
         for record in history:
-            # 兼容处理 training_duration_sec
-            metrics = record.get('metrics', {})
-            if 'training_duration_sec' not in metrics:
-                start = record.get('start_time')
-                end = record.get('completion_time')
-                if start and end:
-                    metrics['training_duration_sec'] = end - start
-                else:
-                    metrics['training_duration_sec'] = 0
-            record['metrics'] = metrics # 确保 metrics 字典被写回
-
-            # 转换时间戳为更易读的ISO 8601格式字符串
-            if record.get('start_time'):
-                record['start_time_iso'] = datetime.fromtimestamp(record['start_time']).isoformat()
-            else:
-                record['start_time_iso'] = 'N/A' # 提供默认值
-
-            if record.get('completion_time'):
-                 record['completion_time_iso'] = datetime.fromtimestamp(record['completion_time']).isoformat()
-            else:
-                record['completion_time_iso'] = 'N/A' # 提供默认值
-
+            record['model_name'] = get_model_name_by_id(record['model_id'])
         return jsonify(history)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        # 如果文件不存在或解析失败，返回空列表
+        if isinstance(e, FileNotFoundError):
+            return jsonify([])
+        print(f"❌ 获取训练历史失败: {e}")
+        return jsonify({"error": "无法获取训练历史"}), 500
 
 @app.route('/api/training_progress', methods=['GET'])
 def get_training_progress():
@@ -581,125 +607,55 @@ def get_trained_models():
         return jsonify({"error": str(e)}), 500
 
 def scan_trained_models():
-    """扫描saved_models目录中的已训练模型
+    """扫描模型保存目录，返回可用于预测的模型列表"""
     
-    Returns:
-        list: 已训练模型列表，每个模型包含id、name、model_type、accuracy等信息
-    """
-    trained_models = []
-    save_dir = SAVED_MODELS_DIR # 使用全局路径常量
-    
-    try:
-        if not os.path.exists(save_dir):
-            print(f"📁 模型保存目录不存在: {save_dir}")
-            os.makedirs(save_dir) # 如果不存在，就创建一个
-            return trained_models
-        
-        # 获取目录中的所有 .pth 文件
-        model_files = [f for f in os.listdir(save_dir) if f.endswith('.pth')]
-        
-        if not model_files:
-            print(f"📂 模型保存目录为空: {save_dir}")
-            return trained_models
-        
-        print(f"🔍 扫描到 {len(model_files)} 个模型文件")
-        
-        for filename in model_files:
-            try:
-                # 方案2：打造一个能同时处理新旧两种命名格式的智能解析器
-                # 正则表达式能像精确制导一样，从复杂文件名中提取所需信息
-                # 模式解释:
-                #   - r'...' : Python中的原生字符串，避免反斜杠问题
-                #   - _(?:best_)?acc_ : 这是一个非捕获组 (?:...)，匹配 "_acc_" 或 "_best_acc_"
-                #                      "best_" 部分是可选的 (?)
-                delimiter_pattern = r'_(?:best_)?acc_'
-                parts = re.split(delimiter_pattern, filename)
-
-                model_id = ""
-                accuracy = 0.0
-
-                if len(parts) == 2:
-                    # 匹配成功，例如 "cnn_attention_best_acc_0.9947.pth"
-                    # parts 会是 ['cnn_attention', '0.9947.pth']
-                    model_id = parts[0]
-                    accuracy = float(parts[1].replace('.pth', ''))
-                elif len(parts) == 1:
-                    # 无法用精度分割，说明可能是 "mlp.pth" 这样的简单格式
-                    model_id = filename.replace('.pth', '')
-                    accuracy = 0.0  # 给予一个默认值，表示精度未知
-                else:
-                    # 格式无法识别，跳过
-                    print(f"⚠️ 文件名格式无法识别，已跳过: {filename}")
-                    continue
-
-                # 获取模型显示名称和信息
-                model_info = get_model_display_info(model_id)
-                if not model_info:
-                    print(f"⚠️ 未找到模型 '{model_id}' 的配置信息，已跳过: {filename}")
-                    continue
-                
-                # 获取文件信息
-                file_path = os.path.join(save_dir, filename)
-                file_stats = os.stat(file_path)
-                file_size = file_stats.st_size
-                
-                # 格式化训练时间（使用time_module避免命名冲突）
-                mtime = file_stats.st_mtime
-                local_time = time_module.localtime(mtime)
-                training_time = time_module.strftime('%Y-%m-%dT%H:%M:%S', local_time)
-                
-                trained_model = {
-                    "id": filename.replace('.pth', ''),  # 使用完整文件名作为ID
-                    "name": f"{model_info['name']} (准确率: {accuracy:.2%})",
-                    "model_type": model_id,
-                    "has_attention": model_info['has_attention'],
-                    "accuracy": accuracy,
-                    "training_time": training_time,
-                    "file_size": file_size,
-                    "parameter_count": model_info['parameter_count']
-                }
-                
-                trained_models.append(trained_model)
-                print(f"✅ 发现模型: {model_id} - 准确率: {accuracy:.4f}")
-                
-            except Exception as e:
-                print(f"⚠️ 解析模型文件失败 {filename}: {e}")
-                continue
-        
-        # 按准确率降序排序
-        trained_models.sort(key=lambda x: x['accuracy'], reverse=True)
-        
-        print(f"📋 成功扫描 {len(trained_models)} 个有效的已训练模型")
-        return trained_models
-        
-    except Exception as e:
-        print(f"❌ 扫描已训练模型失败: {e}")
+    if not os.path.exists(SAVED_MODELS_DIR):
+        print(f"⚠️ 模型目录 {SAVED_MODELS_DIR} 不存在，无法加载模型。")
         return []
+        
+    models = []
+    # 正则表达式改进：更精确地匹配模型ID、准确率和可选的job_id
+    # 分组: (1:model_id) (2:accuracy) (3:job_id, a non-capturing group for the 'job' prefix)
+    pattern = re.compile(r"^(.*?_attention|cnn|mlp|rnn)_(\d+\.\d{2})%_acc(?:_job_.*)?\.pth$")
+
+    for filename in os.listdir(SAVED_MODELS_DIR):
+        match = pattern.match(filename)
+        if match:
+            model_id = match.group(1)
+            accuracy_str = match.group(2)
+            
+            # 使用更稳健的方式查找模型显示名称和参数
+            display_info = get_model_display_info(model_id)
+            
+            models.append({
+                "model_id": model_id,
+                "display_name": display_info["name"],
+                "accuracy": float(accuracy_str),
+                "parameter_count": display_info["parameter_count"],
+                "filename": filename
+            })
+
+    # 按准确率降序排序
+    models.sort(key=lambda x: x['accuracy'], reverse=True)
+    return models
 
 def get_model_display_info(model_id):
-    """获取模型的显示信息
-    
-    Args:
-        model_id: 模型ID（如'cnn', 'mlp'等）
-    
-    Returns:
-        dict: 模型显示信息，如果模型ID无效则返回None
-    """
-    # 在全局模型配置中查找
-    for model_config in AVAILABLE_MODELS:
-        if model_config['id'] == model_id:
-            return {
-                'name': model_config['name'],
-                'has_attention': model_config['has_attention'],
-                'parameter_count': model_config['parameter_count']
-            }
-    
-    print(f"⚠️ 未知的模型类型: {model_id}")
-    return None
+    """根据模型ID获取其显示名称和参数数量"""
+    model_config = next((m for m in AVAILABLE_MODELS if m['id'] == model_id), None)
+    if model_config:
+        return {
+            "name": model_config["name"],
+            "parameter_count": model_config.get("parameter_count", "N/A")
+        }
+    # 如果找不到，提供一个优雅的降级方案
+    return {
+        "name": model_id.replace("_", " ").title(),
+        "parameter_count": "N/A"
+    }
 
 @app.route('/api/predict', methods=['POST'])
 def predict():
-    """执行手写识别"""
+    """处理手写数字识别请求"""
     try:
         data = request.get_json()
         if not data or 'model_id' not in data or 'image_base64' not in data:
@@ -708,43 +664,34 @@ def predict():
         model_id = data['model_id']
         image_base64 = data['image_base64']
         
-        print(f"🔍 开始预测，模型: {model_id}")
+        # 验证模型是否已加载
+        if model_id not in LOADED_MODELS:
+            print(f"⏳ 首次预测请求，正在加载模型: {model_id}")
+            model = load_model_for_prediction(model_id)
+            if model is None:
+                return jsonify({"error": f"模型文件 '{model_id}' 不存在或无法加载"}), 404
+            LOADED_MODELS[model_id] = model
         
-        # 加载模型
-        model = load_model_for_prediction(model_id)
-        if model is None:
-            return jsonify({"error": f"无法加载模型: {model_id}"}), 404
+        model = LOADED_MODELS[model_id]
         
         # 预处理图像
         input_tensor = preprocess_canvas_image(image_base64)
-        if input_tensor is None:
-            return jsonify({"error": "图像预处理失败"}), 400
         
-        # 执行推理
+        # 执行推断
         prediction, probabilities = perform_inference(model, input_tensor)
         
-        result = {
-            "prediction": int(prediction),
-            "probabilities": probabilities.tolist(),
-            "confidence": float(probabilities.max())
-        }
-        
-        print(f"✅ 预测完成: {prediction} (置信度: {probabilities.max():.4f})")
-        return jsonify(result)
-        
+        # 返回结果
+        return jsonify({
+            "prediction": prediction,
+            "probabilities": probabilities.tolist()
+        })
     except Exception as e:
-        print(f"❌ 预测过程出错: {e}")
-        return jsonify({"error": f"预测失败: {str(e)}"}), 500
+        print(f"❌ 预测失败: {e}")
+        # 在生产环境中，可以考虑记录更详细的错误日志
+        return jsonify({"error": "预测过程中发生内部错误"}), 500
 
 def load_model_for_prediction(model_id):
-    """加载指定的模型用于预测
-    
-    Args:
-        model_id: 模型ID（完整文件名，不含.pth扩展名）
-    
-    Returns:
-        torch.nn.Module: 加载的模型，失败时返回None
-    """
+    """为预测加载指定的、最新的模型"""
     try:
         # 检查是否已缓存
         if model_id in LOADED_MODELS:
@@ -819,34 +766,29 @@ def preprocess_canvas_image(image_base64):
         # 转换为PIL图像
         image = Image.open(io.BytesIO(image_data))
         
-        # 转换为灰度图
-        if image.mode != 'L':
-            image = image.convert('L')
+        # 确保图像是灰度的
+        image = image.convert('L')
         
-        # 调整大小到28x28
-        image = image.resize((28, 28), Image.LANCZOS)
+        # 调整大小到 28x28
+        image = image.resize((28, 28), Image.Resampling.LANCZOS)
         
-        # 转换为numpy数组
-        image_array = np.array(image)
+        # 转换为PyTorch Tensor
+        # 标准化参数必须和训练时完全一致！
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.1307,), (0.3081,))
+        ])
         
-        # 归一化到[0,1]
-        image_array = image_array.astype(np.float32) / 255.0
+        tensor = transform(image)
         
-        # 应用MNIST标准归一化（与训练时保持一致）
-        image_array = (image_array - 0.1307) / 0.3081
-        
-        # 转换为PyTorch tensor
-        image_tensor = torch.from_numpy(image_array)
-        
-        # 添加batch和channel维度: (28, 28) -> (1, 1, 28, 28)
-        image_tensor = image_tensor.unsqueeze(0).unsqueeze(0)
-        
-        print(f"📷 图像预处理完成，tensor形状: {image_tensor.shape}")
-        return image_tensor
-        
+        # 添加一个批次维度 (C, H, W) -> (B, C, H, W)
+        return tensor.unsqueeze(0)
+
     except Exception as e:
-        print(f"❌ 图像预处理失败: {e}")
-        return None
+        # 打印更详细的错误
+        import traceback
+        traceback.print_exc()
+        raise ValueError(f"无法处理base64图像数据: {e}")
 
 def perform_inference(model, input_tensor):
     """执行模型推理

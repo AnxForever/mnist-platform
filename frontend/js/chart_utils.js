@@ -160,3 +160,47 @@ export function createLineChart(chartId, data, title) {
     });
     console.log(`📊 已创建折线图: ${title}`);
 }
+
+/**
+ * 根据模型ID返回一个固定的颜色，确保图表颜色一致性
+ * @param {string} modelId - 模型ID (e.g., 'cnn', 'mlp_attention')
+ * @returns {string} - RGBA格式的颜色字符串
+ */
+export function getColorForModel(modelId) {
+    const modelBase = modelId.replace('_attention', '');
+    const hasAttention = modelId.includes('_attention');
+
+    // 基础颜色映射
+    const colors = {
+        'mlp': 'rgba(54, 162, 235, 1)',   // 蓝色
+        'cnn': 'rgba(255, 99, 132, 1)',   // 红色
+        'rnn': 'rgba(75, 192, 192, 1)'    // 绿色
+    };
+
+    let color = colors[modelBase] || 'rgba(201, 203, 207, 1)'; // 默认为灰色
+
+    // 如果有Attention，微调颜色（例如，增加透明度或亮度, 这里我们只简单返回相同颜色，但可以扩展）
+    // 这里为了区分，我们稍微改变一下颜色, 但保持主色调
+    if (hasAttention) {
+        switch (modelBase) {
+            case 'mlp':
+                return 'rgba(30, 136, 229, 1)'; // 深蓝
+            case 'cnn':
+                return 'rgba(239, 83, 80, 1)'; // 深红
+            case 'rnn':
+                return 'rgba(0, 150, 136, 1)'; // 深绿
+        }
+    }
+
+    return color;
+}
+
+/**
+ * 清除所有已创建的图表实例
+ */
+export function clearAllCharts() {
+    Object.keys(chartInstances).forEach(id => {
+        destroyChart(id);
+    });
+    console.log('🧹 已清除所有图表');
+}
