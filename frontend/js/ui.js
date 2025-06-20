@@ -634,15 +634,6 @@ export function showDetailsModal(jobId) {
                         <div><strong>批次大小:</strong> <span>${formatValue(record.config?.batch_size)}</span></div>
                     </div>
                 </div>
-                
-                <div class="info-section">
-                    <h4>📋 任务信息</h4>
-                    <div class="info-grid">
-                        <div><strong>任务ID:</strong> <span class="job-id-span" title="${record.job_id}">${record.job_id.substring(0, 15)}...</span></div>
-                        <div><strong>完成时间:</strong> <span>${formatDate(record.timestamp)}</span></div>
-                        <div><strong>状态:</strong> <span class="status-badge status-${record.status}">${record.status}</span></div>
-                    </div>
-                </div>
             </div>
         </div>
         <!-- 详细数据表格 - 可折叠 -->

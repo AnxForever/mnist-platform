@@ -1,49 +1,51 @@
-# RNN (循环神经网络) 基础模型
 import torch
 import torch.nn as nn
 from .base_model import BaseModel
-from .attention_layers import SimpleAttention
+from .attention_layers import Attention
 
 class RNN(BaseModel):
-    """循环神经网络模型 - 将图像按行序列化处理，可选注意力机制"""
-    
-    def __init__(self, input_size=28, hidden_size=128, num_layers=2, num_classes=10, has_attention=False):
+    def __init__(self, use_attention=False):
         super(RNN, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.has_attention = has_attention
+        self.use_attention = use_attention
         
-        # LSTM层
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, 
-                           batch_first=True, dropout=0.2)
+        # 将图像的每一行视为一个时间步
+        self.input_size = 28  # 每行28个像素
+        self.hidden_size = 128
+        self.num_layers = 2
         
-        # 注意力层 - 应用到LSTM输出
-        if self.has_attention:
-            self.attention = SimpleAttention(hidden_size)
+        self.rnn = nn.LSTM(
+            input_size=self.input_size,
+            hidden_size=self.hidden_size,
+            num_layers=self.num_layers,
+            batch_first=True,
+            dropout=0.2
+        )
         
-        # 全连接层
-        self.fc = nn.Linear(hidden_size, num_classes)
-        self.dropout = nn.Dropout(0.2)
-        
+        if self.use_attention:
+            self.attention = Attention(feature_dim=self.hidden_size, step_dim=28)
+            
+        self.fc = nn.Linear(self.hidden_size, 10)
+
     def forward(self, x):
-        # x shape: (batch_size, 1, 28, 28)
-        # 重塑为序列: (batch_size, 28, 28) - 28个时间步，每步28个特征
-        x = x.squeeze(1)  # 移除通道维度
+        # x 的原始形状: (batch_size, 1, 28, 28)
+        # 调整为 (batch_size, 28, 28) 以匹配RNN的输入序列
+        x = x.squeeze(1)
         
-        # 初始化隐藏状态
         h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
         c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
         
-        # LSTM前向传播
-        out, _ = self.lstm(x, (h0, c0))
+        # RNN 输出: (batch_size, seq_len, hidden_size)
+        out, _ = self.rnn(x, (h0, c0))
         
-        # 使用最后一个时间步的输出
-        out = out[:, -1, :]
-        
-        # 应用注意力机制
-        if self.has_attention:
-            out = self.attention(out)
-        
-        out = self.dropout(out)
+        if self.use_attention:
+            # 使用注意力机制对所有时间步的输出进行加权
+            out, _ = self.attention(out)
+        else:
+            # 只取最后一个时间步的输出
+            out = out[:, -1, :]
+            
         out = self.fc(out)
-        return out 
+        return out
+
+    def get_name(self):
+        return "rnn_attention" if self.use_attention else "rnn" 

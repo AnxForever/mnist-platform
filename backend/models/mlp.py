@@ -1,37 +1,38 @@
-# MLP (多层感知机) 基础模型
 import torch.nn as nn
+import torch.nn.functional as F
 from .base_model import BaseModel
-from .attention_layers import SimpleAttention
+from .attention_layers import Attention
 
 class MLP(BaseModel):
-    """多层感知机模型，可选注意力机制"""
-    
-    def __init__(self, input_size=784, hidden_size=512, num_classes=10, has_attention=False):
+    def __init__(self, use_attention=False):
         super(MLP, self).__init__()
-        self.has_attention = has_attention
+        self.use_attention = use_attention
         
-        self.flatten = nn.Flatten()
-        self.fc1 = nn.Linear(input_size, hidden_size)
-        self.relu1 = nn.ReLU()
-        self.dropout1 = nn.Dropout(0.2)
-        self.fc2 = nn.Linear(hidden_size, hidden_size // 2)
-        self.relu2 = nn.ReLU()
-        self.dropout2 = nn.Dropout(0.2)
+        self.fc1 = nn.Linear(28 * 28, 256)
+        self.bn1 = nn.BatchNorm1d(256)
+        self.fc2 = nn.Linear(256, 128)
+        self.bn2 = nn.BatchNorm1d(128)
         
-        # 注意力层 - 在第二个隐藏层之后添加
-        if self.has_attention:
-            self.attention = SimpleAttention(hidden_size // 2)
+        if self.use_attention:
+            # 注意：这里的step_dim=1, feature_dim=128
+            self.attention = Attention(feature_dim=128, step_dim=1)
         
-        self.fc3 = nn.Linear(hidden_size // 2, num_classes)
-        
+        self.fc3 = nn.Linear(128, 10)
+        self.dropout = nn.Dropout(0.5)
+
     def forward(self, x):
-        x = self.flatten(x)
-        x = self.dropout1(self.relu1(self.fc1(x)))
-        x = self.dropout2(self.relu2(self.fc2(x)))
+        x = x.view(-1, 28 * 28)
+        x = F.relu(self.bn1(self.fc1(x)))
+        x = self.dropout(x)
+        x = F.relu(self.bn2(self.fc2(x)))
         
-        # 应用注意力机制
-        if self.has_attention:
-            x = self.attention(x)
+        if self.use_attention:
+            # 为了使用通用的Attention,需要增加一个step维度
+            x, _ = self.attention(x.unsqueeze(1))
             
+        x = self.dropout(x)
         x = self.fc3(x)
-        return x 
+        return x
+
+    def get_name(self):
+        return "mlp_attention" if self.use_attention else "mlp" 
