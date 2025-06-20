@@ -50,11 +50,16 @@ export async function getTrainedModels() {
 }
 
 // 执行手写识别预测
-export async function predict(data) {
+export async function predict(modelId, filename, imageBase64) {
+    const body = {
+        model_id: modelId,
+        filename: filename,
+        image_base64: imageBase64
+    };
     return fetch(`${API_BASE_URL}/predict`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data),
+        body: JSON.stringify(body),
     }).then(handleResponse);
 }
 

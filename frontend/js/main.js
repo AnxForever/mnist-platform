@@ -2,6 +2,7 @@
 import * as API from './api.js';
 import * as UI from './ui.js';
 import * as ChartUtils from './chart_utils.js';
+import * as Canvas from './canvas.js';
 
 // =================================================================
 // 1. 全局状态和初始化
@@ -25,6 +26,10 @@ document.addEventListener('DOMContentLoaded', () => {
     initEventListeners();
     initGlobalFunctions();
     initModalControls();
+    UI.initializeHistoryTable();
+    Canvas.init(() => {
+        UI.updatePredictButtonState();
+    });
     console.log('✅ 应用初始化完成');
 });
 
@@ -80,7 +85,7 @@ function initEventListeners() {
         if (targetId === 'start-training-btn') {
             handleStartTraining();
         } else if (targetId === 'clear-canvas-btn') {
-            UI.clearCanvas();
+            Canvas.clearCanvas();
         } else if (targetId === 'predict-btn') {
             handlePrediction();
         } else if (targetId === 'refresh-comparison-btn') {
@@ -90,6 +95,9 @@ function initEventListeners() {
         } else if (targetClassList.contains('btn-compare')) {
             const jobId = target.dataset.jobId;
             handleToggleComparison(jobId, target);
+        } else if (targetClassList.contains('btn-details')) {
+            const jobId = target.dataset.jobId;
+            UI.showDetailsModal(jobId);
         }
     });
 
@@ -176,22 +184,18 @@ async function handleStartTraining() {
             batch_size: params.batch_size
         }));
         
-        console.log('🔥 开始训练，配置:', trainingConfigs);
-        
         const response = await API.startTraining({ models: trainingConfigs });
         
+        // 把新创建的任务ID注册到全局状态中，以便轮询
+        response.jobs.forEach(job => {
+            AppState.currentTrainingJobs[job.job_id] = { status: 'queued', model_id: job.model_id };
+        });
+
         const jobsWithNames = response.jobs.map(job => {
             const model = AppState.availableModels.find(m => m.id === job.model_id);
             return {
                 ...job,
                 model_name: model ? model.name : job.model_id
-            };
-        });
-        
-        jobsWithNames.forEach(job => {
-            AppState.currentTrainingJobs[job.job_id] = {
-                model_id: job.model_id,
-                status: 'queued'
             };
         });
         
@@ -230,10 +234,22 @@ async function updateTrainingProgress() {
     }
     
     try {
-        const progress = await API.getTrainingProgress();
+        const response = await API.getTrainingProgress(runningJobIds);
+        console.log('📈 收到训练进度:', JSON.stringify(response, null, 2));
+        
+        // 后端返回 {progress: Array}，需要转换为按job_id索引的对象
+        const progressByJobId = {};
+        if (response.progress && Array.isArray(response.progress)) {
+            response.progress.forEach(jobProgress => {
+                if (jobProgress.job_id) {
+                    progressByJobId[jobProgress.job_id] = jobProgress;
+                }
+            });
+        }
+        
         runningJobIds.forEach(jobId => {
-            if (progress.jobs[jobId]) {
-                const jobProgress = progress.jobs[jobId];
+            if (progressByJobId[jobId]) {
+                const jobProgress = progressByJobId[jobId];
                 UI.updateProgressBar(jobId, jobProgress);
                 AppState.currentTrainingJobs[jobId].status = jobProgress.status;
             }
@@ -244,89 +260,98 @@ async function updateTrainingProgress() {
 }
 
 function getTrainingParameters() {
-    const epochs = parseInt(document.getElementById('epochs-slider').value, 10);
-    const lr = parseFloat(document.getElementById('lr-slider').value);
-    const batch_size = parseInt(document.getElementById('batch-size-slider').value, 10);
+    const epochsElement = document.getElementById('epochs-slider');
+    const lrElement = document.getElementById('lr-slider');
+    const batchSizeElement = document.getElementById('batch-size-slider');
+    
+    // 安全检查：如果元素不存在或值为空，使用默认值
+    const epochs = epochsElement && epochsElement.value ? parseInt(epochsElement.value, 10) : 10;
+    const lr = lrElement && lrElement.value ? parseFloat(lrElement.value) : 0.001;
+    const batch_size = batchSizeElement && batchSizeElement.value ? parseInt(batchSizeElement.value, 10) : 64;
+    
     return { epochs, lr, batch_size };
 }
 
 // =================================================================
-// 4. 手写识别页逻辑
+// 4. 手写识别页逻辑 (Handwriting Recognition)
 // =================================================================
 
 async function initHandwritingRecognition() {
-    UI.showEmptyResult();
-    UI.initializeCanvas();
-    if (AppState.trainedModels.length === 0) {
-        await loadTrainedModelsForPrediction();
-    } else {
-        UI.renderTrainedModels(AppState.trainedModels);
-        UI.updatePredictButtonState();
+    try {
+        const trainedModels = await API.getTrainedModels();
+        UI.updatePredictionModelDropdown(trainedModels);
+    } catch (error) {
+        console.error('❌ 加载已训练模型列表失败:', error);
+        UI.showErrorMessage('加载可用模型列表失败，请检查后端服务。');
+        UI.updatePredictionModelDropdown([]); // 传入空数组以显示提示信息
     }
 }
 
 async function handlePrediction() {
-    if (UI.isCanvasEmpty()) {
-        UI.showErrorMessage('请先绘制一个数字');
+    if (Canvas.isEmpty()) {
+        UI.showErrorMessage('请先在画板上写一个数字');
         return;
     }
+
+    const select = document.getElementById('prediction-model-select');
+    const selectedOption = select.options[select.selectedIndex];
+    
+    if (!selectedOption || !selectedOption.value) {
+        UI.showErrorMessage('请选择一个有效的模型进行预测');
+        return;
+    }
+
+    const filename = selectedOption.value;
+    const modelId = selectedOption.dataset.modelId;
+    const imageBase64 = Canvas.getImageData();
+
+    UI.showLoadingOverlay('正在识别手写数字...');
+
     try {
-        UI.showPredictionLoading();
-        const model_id = document.getElementById('prediction-model-select').value;
-        const imageData = UI.getCanvasImageData();
-        const result = await API.predict({ model_id, image_base64: imageData });
-        UI.renderPredictionResult(result);
+        const result = await API.predict(modelId, filename, imageBase64);
+        UI.renderPredictionResult({
+            prediction: result.predicted_class,
+            probabilities: result.probabilities
+        });
+        console.log('🔍 预测结果:', result);
     } catch (error) {
         console.error('❌ 预测失败:', error);
-        UI.showErrorMessage('预测失败: ' + (error.error || error.message));
-        UI.showEmptyResult();
+        UI.showErrorMessage('预测失败: ' + error.message);
+    } finally {
+        UI.hideLoadingOverlay();
     }
 }
 
 // =================================================================
-// 5. 数据加载与处理 (结果页 & 对比页)
+// 5. 训练结果与对比 (Results & Comparison)
 // =================================================================
-
-async function loadTrainedModelsForPrediction() {
-    try {
-        UI.showPredictionLoading();
-        const models = await API.getTrainedModels();
-        AppState.trainedModels = models;
-        UI.renderTrainedModels(models);
-        UI.updatePredictButtonState();
-    } catch (error) {
-        console.error('❌ 加载已训练模型失败:', error);
-        UI.showErrorMessage('加载已训练模型列表失败，请检查后端服务。');
-        UI.showEmptyResult();
-    }
-}
 
 async function loadTrainingHistory() {
-    if (AppState.trainingHistory.length > 0 && !window.forceRefreshHistory) {
-        UI.renderHistoryTable(AppState.trainingHistory);
-        return;
-    }
     try {
-        const historyData = await API.getTrainingHistory();
-        AppState.trainingHistory = historyData.map(normalizeHistoryRecord);
-        UI.renderHistoryTable(AppState.trainingHistory);
-        console.log(`📚 已加载并归一化 ${AppState.trainingHistory.length} 条训练历史`);
-        window.forceRefreshHistory = false;
+        UI.showLoadingOverlay('正在加载训练历史...');
+        const history = await API.getTrainingHistory();
+        
+        AppState.trainingHistory = history.map(normalizeHistoryRecord);
+        
+        console.log('📚 已加载训练历史:', AppState.trainingHistory.length, '条记录');
+        
+        UI.renderHistoryTable();
+
     } catch (error) {
         console.error('❌ 加载训练历史失败:', error);
         UI.showErrorMessage('加载训练历史记录失败。');
     }
 }
 
-/**
- * 古文翻译机 (Data Normalizer)
- * 将旧版嵌套格式的训练历史记录，转换为新版扁平化格式。
- * @param {object} record - 一条训练记录。
- * @returns {object} - 格式统一的训练记录。
- */
 function normalizeHistoryRecord(record) {
+    // 检查是否为新的增强数据格式
+    if ('best_accuracy' in record && 'hyperparameters_extended' in record) {
+        return record; // 已经是新格式，直接返回
+    }
+    
+    // 检查是否为旧的标准化格式
     if ('best_accuracy' in record && 'final_loss' in record) {
-        return record;
+        return record; // 已经标准化过，直接返回
     }
 
     const newRecord = {};
@@ -339,7 +364,19 @@ function normalizeHistoryRecord(record) {
     newRecord.status = record.status;
     newRecord.error_message = record.error_message || null;
     
-    newRecord.timestamp = record.completion_time || record.start_time;
+    // 🔥 修复时间戳bug：Unix秒级时间戳需要转换为毫秒级，然后转为ISO字符串
+    const rawTimestamp = record.completion_time || record.start_time || record.timestamp;
+    if (rawTimestamp) {
+        if (typeof rawTimestamp === 'string') {
+            newRecord.timestamp = rawTimestamp; // 已经是ISO字符串
+        } else {
+            // 如果时间戳小于某个阈值，说明是秒级时间戳，需要乘以1000
+            const timestamp = rawTimestamp < 10000000000 ? rawTimestamp * 1000 : rawTimestamp;
+            newRecord.timestamp = new Date(timestamp).toISOString();
+        }
+    } else {
+        newRecord.timestamp = new Date().toISOString();
+    }
 
     newRecord.config = {
         epochs: oldHyperparams.epochs,
@@ -347,15 +384,24 @@ function normalizeHistoryRecord(record) {
         batch_size: oldHyperparams.batch_size
     };
     
-    newRecord.best_accuracy = oldMetrics.final_accuracy || 0;
-    newRecord.final_loss = oldMetrics.final_loss || 0;
-    newRecord.model_params = oldMetrics.total_params || 0;
-    newRecord.duration_seconds = oldMetrics.training_duration_sec || 0;
+    newRecord.best_accuracy = oldMetrics.final_accuracy || record.best_accuracy || 0;
+    newRecord.final_train_loss = oldMetrics.final_loss || record.final_train_loss || 0;
+    newRecord.final_val_loss = record.final_val_loss || newRecord.final_train_loss;
+    newRecord.model_params = oldMetrics.total_params || record.model_params || 0;
+    newRecord.trainable_params = record.trainable_params || newRecord.model_params;
+    newRecord.duration_seconds = oldMetrics.training_duration_sec || record.duration_seconds || 0;
     
-    newRecord.samples_per_second = oldMetrics.samples_per_second || 0;
+    newRecord.samples_per_second = oldMetrics.samples_per_second || record.samples_per_second || 0;
     newRecord.epoch_metrics = record.epoch_metrics || [];
+    
+    // 增强数据（如果存在）
+    newRecord.stability_metrics = record.stability_metrics || {};
+    newRecord.environment_info = record.environment_info || {};
+    newRecord.hyperparameters_extended = record.hyperparameters_extended || {
+        basic: newRecord.config
+    };
 
-    console.log(`📜 翻译古文记录: ${record.job_id}`);
+    console.log(`✅ 标准化历史记录: ${record.job_id}`);
     return newRecord;
 }
 
@@ -402,6 +448,7 @@ async function displayComparisonCharts() {
 
     const processedData = processDataForComparison(filteredHistory);
     UI.renderComparisonCharts(processedData);
+    UI.renderHyperparameterComparison(filteredHistory);
 }
 
 function normalizeInverseMetric(value, maxValue) {
@@ -410,24 +457,47 @@ function normalizeInverseMetric(value, maxValue) {
 }
 
 function prepareRadarData(modelsData) {
-    const radarLabels = ['准确率', '速度', '参数量', '稳定性(损失)'];
-    const maxAccuracy = Math.max(...modelsData.map(m => m.best_accuracy)) || 1;
-    const maxSpeed = Math.max(...modelsData.map(m => m.samples_per_second || 0)) || 1;
-    const maxParams = Math.max(...modelsData.map(m => m.model_params)) || 1;
-    const maxLoss = Math.max(...modelsData.map(m => m.final_loss)) || 1;
+    const radarLabels = ['准确率', '训练效率', '模型效率', '训练稳定性'];
+    
+    // 计算各维度的统计数据
+    const accuracies = modelsData.map(m => m.best_accuracy);
+    const speeds = modelsData.map(m => m.samples_per_second || 0);
+    const params = modelsData.map(m => m.model_params || 0);
+    const stabilities = modelsData.map(m => {
+        // 使用验证集准确率的标准差来衡量稳定性（越小越稳定）
+        const valAccStd = m.stability_metrics?.val_accuracy_std || 0.1;
+        return 1 / (1 + valAccStd * 10); // 转换为0-1之间，越稳定越接近1
+    });
+    
+    const maxAccuracy = Math.max(...accuracies) || 1;
+    const maxSpeed = Math.max(...speeds) || 1;
+    const maxParams = Math.max(...params) || 1;
     
     const datasets = modelsData.map(model => {
         const color = ChartUtils.getColorForModel(model.model_id);
-        return {
+        
+        // 计算各维度的标准化分数 (0-1)
+        const accuracyScore = model.best_accuracy / maxAccuracy;
+        const speedScore = (model.samples_per_second || 0) / maxSpeed;
+        const efficiencyScore = maxParams > 0 ? (1 - (model.model_params || 0) / maxParams) : 1; // 参数越少效率越高
+        const stabilityScore = model.stability_metrics?.val_accuracy_std !== undefined ? 
+            1 / (1 + model.stability_metrics.val_accuracy_std * 10) : 0.8; // 默认稳定性
+
+    return {
             label: model.model_name || model.model_id,
-            data: [
-                (model.best_accuracy / maxAccuracy),
-                normalizeInverseMetric(model.model_params, maxParams),
-                (model.samples_per_second || 0) / maxSpeed,
-                normalizeInverseMetric(model.final_loss, maxLoss)
-            ].map(v => isNaN(v) ? 0 : v),
+                data: [
+                Math.max(0, Math.min(1, accuracyScore)),
+                Math.max(0, Math.min(1, speedScore)),
+                Math.max(0, Math.min(1, efficiencyScore)),
+                Math.max(0, Math.min(1, stabilityScore))
+            ],
             backgroundColor: color.replace('1)', '0.2)'),
             borderColor: color,
+            borderWidth: 2,
+            pointBackgroundColor: color,
+                pointBorderColor: '#fff',
+                pointHoverBackgroundColor: '#fff',
+            pointHoverBorderColor: color
         };
     });
     return { labels: radarLabels, datasets };
@@ -435,49 +505,47 @@ function prepareRadarData(modelsData) {
 
 function prepareBarData(modelsData) {
     const labels = modelsData.map(m => m.model_name || m.model_id);
-    const data = modelsData.map(m => m.best_accuracy);
-    const colors = modelsData.map(m => ChartUtils.getColorForModel(m.model_id));
-    return { 
-        labels, 
+    const accuracyData = modelsData.map(m => m.best_accuracy);
+
+    return {
+        labels: labels,
         datasets: [{
             label: '最高准确率',
-            data: data,
-            backgroundColor: colors
+            data: accuracyData,
+            backgroundColor: modelsData.map(m => ChartUtils.getColorForModel(m.model_id)),
         }]
     };
 }
 
-function prepareLineData(modelsData, fullHistory) {
-    const allEpochs = [...new Set(fullHistory.flatMap(r => r.epoch_metrics ? r.epoch_metrics.map(m => m.epoch) : []))].sort((a, b) => a - b);
-    
+function prepareLineData(modelsData) {
+    // 1. 确定所有训练轮次的最大值，以统一X轴
+    const allEpochs = modelsData.flatMap(m => m.epoch_metrics.map(e => e.epoch));
+    const maxEpoch = Math.max(...allEpochs, 0);
+    const labels = Array.from({ length: maxEpoch }, (_, i) => i + 1);
+
+    // 2. 为每个模型创建一个数据集
     const datasets = modelsData.map(model => {
-        const bestRun = model;
         const color = ChartUtils.getColorForModel(model.model_id);
+        const data = new Array(maxEpoch).fill(null); // 用null填充，以便对齐
 
-        if (!bestRun.epoch_metrics || bestRun.epoch_metrics.length === 0) {
-            return {
-                label: model.model_name || model.model_id,
-                data: [],
-                borderColor: color,
-                fill: false,
-            };
-        }
-        
-        const dataPoints = allEpochs.map(epoch => {
-            const metric = bestRun.epoch_metrics.find(m => m.epoch === epoch);
-            return metric ? metric.accuracy : null;
+        model.epoch_metrics.forEach(epoch => {
+            // epoch号从1开始，所以索引是 epoch - 1
+            if(epoch.epoch - 1 < maxEpoch) {
+                data[epoch.epoch - 1] = epoch.val_accuracy;
+            }
         });
-
+        
         return {
             label: model.model_name || model.model_id,
-            data: dataPoints,
+            data: data,
             borderColor: color,
             backgroundColor: color.replace('1)', '0.1)'),
             fill: false,
             tension: 0.1
         };
     });
-    return { labels: allEpochs, datasets };
+
+    return { labels, datasets };
 }
 
 function processDataForComparison(historyData) {
@@ -490,7 +558,7 @@ function processDataForComparison(historyData) {
     return {
         radar: prepareRadarData(modelsData),
         bar: prepareBarData(modelsData),
-        line: prepareLineData(modelsData, historyData)
+        line: prepareLineData(modelsData)
     };
 }
 
@@ -516,4 +584,4 @@ function initModalControls() {
 }
 
 // 导出状态（用于调试）
-window.AppState = AppState; 
+window.AppState = AppState;

@@ -80,6 +80,11 @@ export function createBarChart(chartId, data, title) {
     
     destroyChart(chartId); // 先销毁旧图表
 
+    // 智能Y轴范围调整
+    const allDataPoints = data.datasets.flatMap(dataset => dataset.data);
+    const minValue = Math.min(...allDataPoints);
+    const suggestedMin = minValue > 0.9 ? minValue * 0.99 : minValue * 0.9;
+
     chartInstances[chartId] = new Chart(ctx, {
         type: 'bar',
         data: data,
@@ -100,12 +105,147 @@ export function createBarChart(chartId, data, title) {
             },
             scales: {
                 y: {
-                    beginAtZero: true
+                    beginAtZero: false,
+                    suggestedMin: suggestedMin,
+                    suggestedMax: 1.0,
+                    ticks: {
+                        // 格式化为百分比
+                        callback: function(value) {
+                            return (value * 100).toFixed(1) + '%';
+                        }
+                    }
                 }
             }
         }
     });
     console.log(`📊 已创建柱状图: ${title}`);
+}
+
+/**
+ * 渲染损失对比折线图 (训练 vs 验证)
+ * @param {string} chartId - canvas元素的ID
+ * @param {Array} history - 包含epoch指标的数组
+ */
+export function renderLossChart(chartId, history) {
+    const ctx = document.getElementById(chartId);
+    if (!ctx) {
+        console.error(`❌ 未找到ID为 '${chartId}' 的Canvas元素`);
+        return;
+    }
+    
+    destroyChart(chartId); // 先销毁旧图表
+
+    const labels = history.map(h => `Epoch ${h.epoch}`);
+    const trainLossData = history.map(h => h.loss);
+    // 关键：如果旧数据没有val_loss，则传递null，Chart.js会优雅地处理断点
+    const valLossData = history.map(h => h.val_loss ?? null);
+
+    const data = {
+        labels: labels,
+        datasets: [
+            {
+                label: '训练损失 (Training Loss)',
+                data: trainLossData,
+                borderColor: 'rgba(54, 162, 235, 1)',
+                backgroundColor: 'rgba(54, 162, 235, 0.2)',
+                fill: false,
+                tension: 0.1
+            },
+            {
+                label: '验证损失 (Validation Loss)',
+                data: valLossData,
+                borderColor: 'rgba(255, 99, 132, 1)',
+                backgroundColor: 'rgba(255, 99, 132, 0.2)',
+                fill: false,
+                tension: 0.1,
+                borderDash: [5, 5] // 使用虚线以区分
+            }
+        ]
+    };
+
+    chartInstances[chartId] = new Chart(ctx, {
+        type: 'line',
+        data: data,
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                title: { display: true, text: '训练 vs 验证 损失', font: { size: 16 } },
+                legend: { position: 'top' }
+            },
+            scales: {
+                x: { title: { display: true, text: '训练轮次 (Epoch)' } },
+                y: { beginAtZero: true, title: { display: true, text: '损失值 (Loss)' } }
+            }
+        }
+    });
+    console.log(`📊 已创建损失对比图: ${chartId}`);
+}
+
+/**
+ * 渲染准确率对比折线图 (训练 vs 验证)
+ * @param {string} chartId - canvas元素的ID
+ * @param {Array} history - 包含epoch指标的数组
+ */
+export function renderAccuracyChart(chartId, history) {
+    const ctx = document.getElementById(chartId);
+    if (!ctx) {
+        console.error(`❌ 未找到ID为 '${chartId}' 的Canvas元素`);
+        return;
+    }
+    
+    destroyChart(chartId); // 先销毁旧图表
+
+    const labels = history.map(h => `Epoch ${h.epoch}`);
+    const trainAccData = history.map(h => h.accuracy);
+    // 关键：如果旧数据没有val_accuracy，则传递null
+    const valAccData = history.map(h => h.val_accuracy ?? null);
+
+    const data = {
+        labels: labels,
+        datasets: [
+            {
+                label: '训练准确率 (Training Accuracy)',
+                data: trainAccData,
+                borderColor: 'rgba(75, 192, 192, 1)',
+                backgroundColor: 'rgba(75, 192, 192, 0.2)',
+                fill: false,
+                tension: 0.1
+            },
+            {
+                label: '验证准确率 (Validation Accuracy)',
+                data: valAccData,
+                borderColor: 'rgba(255, 159, 64, 1)',
+                backgroundColor: 'rgba(255, 159, 64, 0.2)',
+                fill: false,
+                tension: 0.1,
+                borderDash: [5, 5] // 使用虚线以区分
+            }
+        ]
+    };
+
+    chartInstances[chartId] = new Chart(ctx, {
+        type: 'line',
+        data: data,
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                title: { display: true, text: '训练 vs 验证 准确率', font: { size: 16 } },
+                legend: { position: 'top' }
+            },
+            scales: {
+                x: { title: { display: true, text: '训练轮次 (Epoch)' } },
+                y: {
+                    beginAtZero: false, // 准确率可能从较高值开始
+                    suggestedMin: Math.min(...trainAccData, ...valAccData.filter(v => v !== null)) * 0.95,
+                    suggestedMax: 1,
+                    title: { display: true, text: '准确率 (Accuracy)' }
+                }
+            }
+        }
+    });
+    console.log(`📊 已创建准确率对比图: ${chartId}`);
 }
 
 /**
@@ -122,6 +262,12 @@ export function createLineChart(chartId, data, title) {
     }
     
     destroyChart(chartId); // 先销毁旧图表
+
+    // 智能Y轴范围调整
+    const allDataPoints = data.datasets.flatMap(dataset => dataset.data.filter(d => d !== null));
+    const minValue = allDataPoints.length > 0 ? Math.min(...allDataPoints) : 0.8;
+    // 如果最低值已经很高了，就把起点设置得更接近一些，以放大差异
+    const suggestedMin = minValue > 0.9 ? minValue * 0.995 : minValue * 0.98;
 
     chartInstances[chartId] = new Chart(ctx, {
         type: 'line',
@@ -149,10 +295,18 @@ export function createLineChart(chartId, data, title) {
                     }
                 },
                 y: {
-                    beginAtZero: true,
+                    beginAtZero: false,
+                    suggestedMin: suggestedMin,
+                    suggestedMax: 1.0,
                     title: {
                         display: true,
-                        text: '准确率'
+                        text: '验证准确率'
+                    },
+                    ticks: {
+                        // 格式化为百分比
+                        callback: function(value) {
+                            return (value * 100).toFixed(1) + '%';
+                        }
                     }
                 }
             }
