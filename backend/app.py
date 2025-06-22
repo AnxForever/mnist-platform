@@ -52,6 +52,15 @@ CHECKPOINTS_DIR = os.path.join(APP_DIR, 'checkpoints')
 os.makedirs(SAVED_MODELS_DIR, exist_ok=True)
 os.makedirs(CHECKPOINTS_DIR, exist_ok=True)
 
+# 定义数据存储的根目录。
+# 在云端部署时，它会读取 `DATA_DIR` 环境变量 (例如, /tmp)。
+# 在本地开发时，它会默认使用当前项目目录下的 `local_data` 文件夹。
+DATA_DIR = os.environ.get('DATA_DIR', 'local_data')
+
+# 确保在所有环境中，数据目录都存在
+os.makedirs(DATA_DIR, exist_ok=True)
+print(f"💾 数据将存储在: {os.path.abspath(DATA_DIR)}")
+
 
 # 配置Flask应用以正确处理中文JSON输出
 app.config['JSON_AS_ASCII'] = False
@@ -63,7 +72,8 @@ LOADED_MODELS = {}
 MAX_CONCURRENT_TRAINING_JOBS = int(os.environ.get('MAX_CONCURRENT_TRAINING_JOBS', 3))  # 云端减少并发
 TRAINING_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_TRAINING_JOBS)
 TRAINING_LOCK = threading.Lock()
-PERSISTENCE_MANAGER = PersistenceManager(APP_DIR, lock=TRAINING_LOCK)
+# 使用 DATA_DIR 初始化持久化管理器，确保数据写入正确位置
+PERSISTENCE_MANAGER = PersistenceManager(base_dir=DATA_DIR, lock=TRAINING_LOCK)
 PRETRAINED_MANAGER = PretrainedModelManager(APP_DIR)
 
 # 6个模型的配置信息
@@ -282,8 +292,12 @@ def perform_real_training(job_id, model_id, epochs, lr, batch_size):
     environment_info = collect_environment_info(device)
     
     transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
-    data_dir = os.path.join(APP_DIR, 'data')
-    full_train_dataset = datasets.MNIST(root=data_dir, train=True, download=True, transform=transform)
+    
+    # 将MNIST数据集的下载位置也指向我们的数据目录
+    mnist_data_dir = os.path.join(DATA_DIR, 'mnist_data')
+    os.makedirs(mnist_data_dir, exist_ok=True)
+    
+    full_train_dataset = datasets.MNIST(root=mnist_data_dir, train=True, download=True, transform=transform)
     train_size = int(0.9 * len(full_train_dataset))
     val_size = len(full_train_dataset) - train_size
     train_subset, val_subset = random_split(full_train_dataset, [train_size, val_size])
@@ -436,8 +450,10 @@ def scan_trained_models():
     # 1. 扫描用户训练的模型
     pattern = re.compile(r"^(?P<model_id>.+)_best_acc_(?P<accuracy>\d+\.\d+)\.pth$")
     
-    if os.path.exists(SAVED_MODELS_DIR):
-        for filename in os.listdir(SAVED_MODELS_DIR):
+    # 直接使用 persistence_manager 提供的路径，不再依赖本地常量
+    saved_models_dir = PERSISTENCE_MANAGER.saved_models_dir
+    if os.path.exists(saved_models_dir):
+        for filename in os.listdir(saved_models_dir):
             match = pattern.match(filename)
             if match:
                 model_info = match.groupdict()
@@ -516,8 +532,9 @@ def load_model_for_prediction(model_id, filename):
             else:
                 print(f"❌ 加载预训练模型失败: {error}")
         
-        # 加载用户训练的模型
-        model_path = os.path.join(SAVED_MODELS_DIR, filename)
+        # 加载用户训练的模型，使用 persistence_manager 提供的路径
+        saved_models_dir = PERSISTENCE_MANAGER.saved_models_dir
+        model_path = os.path.join(saved_models_dir, filename)
         if not os.path.exists(model_path):
             return None
         model_instance = get_model_instance(model_id)
