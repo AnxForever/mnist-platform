@@ -3,30 +3,10 @@
 
 const CONFIG = {
     // API基础URL配置
-    API_BASE_URL: (() => {
-        // 1. 优先使用环境变量 (Vercel等平台)
-        if (typeof window !== 'undefined' && window.ENV && window.ENV.API_BASE_URL) {
-            return window.ENV.API_BASE_URL;
-        }
-        
-        // 2. 检测当前环境
-        const hostname = window.location.hostname;
-        const protocol = window.location.protocol;
-        
-        // 本地开发环境
-        if (hostname === 'localhost' || hostname === '127.0.0.1') {
-            return 'http://localhost:5000';
-        }
-        
-        // Vercel部署环境 - 使用Railway后端
-        if (hostname.includes('vercel.app')) {
-            // 这里需要替换为实际的Railway应用URL
-            return 'https://your-railway-app.railway.app';
-        }
-        
-        // 默认本地开发
-        return 'http://localhost:5000';
-    })(),
+    API_BASE_URL: 'https://mnist-platform-backend.onrender.com',
+    // API_BASE_URL: 'http://127.0.0.1:5000', // 本地测试时使用
+    DEFAULT_MODEL: 'cnn',
+    UPDATE_INTERVAL: 2000, // ms
     
     // API端点配置
     ENDPOINTS: {
