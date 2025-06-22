@@ -2,7 +2,6 @@ services:
   - type: web
     name: mnist-platform-backend
     runtime: python3
-    rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: python app.py
     envVars:
@@ -10,6 +9,4 @@ services:
         value: 10000
       - key: FLASK_ENV
         value: production
-      - key: PYTHON_VERSION
-        value: 3.10
     plan: free 
