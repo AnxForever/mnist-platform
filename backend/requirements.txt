@@ -4,7 +4,7 @@ Flask-CORS==4.0.0
 
 # PyTorch CPU专用版本 - 减少包大小，提升部署速度
 torch==2.6.0+cpu
-torchvision==0.17.0+cpu
+torchvision==0.21.0+cpu
 
 # 核心科学计算库
 Pillow==10.0.0
