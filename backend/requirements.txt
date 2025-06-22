@@ -1,10 +1,21 @@
-# CPU优化版本 - 适合云端部署，Python 3.13兼容
+# CPU优化版本 - 适合云端部署，Python 3.13兼容，优化内存使用
 Flask==2.3.3
 Flask-CORS==4.0.0
-torch==2.6.0
-torchvision==0.17.0
+
+# PyTorch CPU专用版本 - 减少包大小，提升部署速度
+torch==2.6.0+cpu --index-url https://download.pytorch.org/whl/cpu
+torchvision==0.17.0+cpu --index-url https://download.pytorch.org/whl/cpu
+
+# 核心科学计算库
 Pillow==10.0.0
 numpy==1.26.4
+
+# 系统监控（云端可选，减少启动时间）
 psutil==5.9.5
+
+# 可视化支持
 streamlit==1.39.0
-matplotlib==3.8.0 
+matplotlib==3.8.0
+
+# 依赖管理
+packaging==25.0 

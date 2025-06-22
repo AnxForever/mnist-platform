@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: mnist-platform-backend
+    runtime: python3
+    rootDir: backend
+    buildCommand: |
+      pip install --upgrade pip &&
+      pip install -r requirements.txt --no-cache-dir
+    startCommand: python app.py
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: FLASK_ENV
+        value: production
+      - key: PYTHONUNBUFFERED
+        value: 1
+      - key: FLASK_SKIP_DOTENV
+        value: 1
+    plan: free
+    healthCheckPath: /api/status
+    numInstances: 1
+    disk:
+      name: mnist-data
+      mountPath: /tmp
+      sizeGB: 1 

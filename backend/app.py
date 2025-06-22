@@ -563,14 +563,30 @@ def check_system_health():
 
 
 if __name__ == '__main__':
-    check_system_health()
-    # 检测运行环境
+    # 获取端口号，支持云端部署的PORT环境变量
     port = int(os.environ.get('PORT', 5000))
-    debug_mode = os.environ.get('FLASK_ENV') != 'production'
+    
+    # 获取主机地址，云端部署需要监听所有接口
+    host = os.environ.get('HOST', '0.0.0.0')
+    
+    # 获取调试模式配置
+    debug = os.environ.get('FLASK_ENV', 'development') == 'development'
     
     print(f"🚀 启动MNIST智能分析平台后端服务")
-    print(f"   端口: {port}")
-    print(f"   调试模式: {debug_mode}")
-    print(f"   预训练模型: {len(PRETRAINED_MANAGER.get_pretrained_models_list())}个")
+    print(f"📡 监听地址: {host}:{port}")
+    print(f"🔧 环境模式: {'开发' if debug else '生产'}")
+    print(f"🧠 PyTorch设备: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
     
-    app.run(host='0.0.0.0', port=port, debug=debug_mode, use_reloader=False)
+    # 执行系统健康检查
+    check_system_health()
+    
+    # 生产环境优化设置
+    if not debug:
+        print("⚙️  生产环境优化已启用")
+        # 禁用Flask自动重载和调试信息
+        app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 31536000  # 1年缓存
+        
+    print("✅ 后端服务启动完成，等待前端连接...")
+    
+    # 启动Flask应用
+    app.run(host=host, port=port, debug=debug, threaded=True)
