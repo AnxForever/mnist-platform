@@ -1,5 +1,6 @@
 // API 模块 - 封装所有后端API请求
-const API_BASE_URL = 'http://localhost:5000/api';
+// 使用配置文件中的API基础URL
+const API_BASE_URL = `${CONFIG.API_BASE_URL}/api`;
 
 // 网络请求的通用错误处理
 async function handleResponse(response) {
@@ -27,6 +28,11 @@ async function fetchWithRetry(url, options = {}, retries = 3) {
 // 获取可选模型列表
 export async function getModels() {
     return fetch(`${API_BASE_URL}/models`).then(handleResponse);
+}
+
+// 获取预训练模型列表
+export async function getPretrainedModels() {
+    return fetch(`${API_BASE_URL}/pretrained_models`).then(handleResponse);
 }
 
 // 启动模型训练 - 修复参数格式

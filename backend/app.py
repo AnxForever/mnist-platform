@@ -34,11 +34,12 @@ except ImportError:
 # Project-specific imports
 from models import get_model_instance
 from core.persistence import PersistenceManager
+from pretrained_models import PretrainedModelManager
 try:
     import psutil
 except ImportError:
     psutil = None
-    print("⚠️ 'psutil' a an pynvml 库未安装。")
+    print("⚠️ 'psutil' 库未安装。")
 
 
 app = Flask(__name__)
@@ -59,10 +60,11 @@ app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 # 全局状态管理
 TRAINING_JOBS = {}
 LOADED_MODELS = {}
-MAX_CONCURRENT_TRAINING_JOBS = int(os.environ.get('MAX_CONCURRENT_TRAINING_JOBS', 5))
+MAX_CONCURRENT_TRAINING_JOBS = int(os.environ.get('MAX_CONCURRENT_TRAINING_JOBS', 3))  # 云端减少并发
 TRAINING_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_TRAINING_JOBS)
 TRAINING_LOCK = threading.Lock()
 PERSISTENCE_MANAGER = PersistenceManager(APP_DIR, lock=TRAINING_LOCK)
+PRETRAINED_MANAGER = PretrainedModelManager(APP_DIR)
 
 # 6个模型的配置信息
 AVAILABLE_MODELS = [
@@ -84,17 +86,60 @@ def get_model_name_by_id(model_id):
 @app.route('/api/status', methods=['GET'])
 def get_status():
     """检查服务器状态"""
-    return jsonify({
-        "status": "running",
-        "message": "MNIST智能分析平台后端服务正常运行",
-        "timestamp": time_module.strftime("%Y-%m-%dT%H:%M:%S")
-    })
+    try:
+        # 检查预训练模型
+        pretrained_count = len(PRETRAINED_MANAGER.get_pretrained_models_list())
+        
+        # 检查系统资源
+        system_info = {}
+        if psutil:
+            system_info = {
+                "cpu_percent": psutil.cpu_percent(),
+                "memory_percent": psutil.virtual_memory().percent,
+                "disk_percent": psutil.disk_usage('/').percent if os.path.exists('/') else 0
+            }
+        
+        return jsonify({
+            "status": "running",
+            "message": "MNIST智能分析平台后端服务正常运行",
+            "timestamp": time_module.strftime("%Y-%m-%dT%H:%M:%S"),
+            "version": "2.0.0",
+            "environment": "production" if os.environ.get('FLASK_ENV') == 'production' else "development",
+            "pretrained_models": pretrained_count,
+            "active_training_jobs": len([job for job in TRAINING_JOBS.values() if job['status'] == 'running']),
+            "system_info": system_info,
+            "pytorch_version": torch.__version__,
+            "device": "CPU" if not torch.cuda.is_available() else "CUDA"
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"状态检查失败: {str(e)}",
+            "timestamp": time_module.strftime("%Y-%m-%dT%H:%M:%S")
+        }), 500
 
 @app.route('/api/models', methods=['GET'])
 def get_models():
     """获取可选模型列表"""
     try:
-        return jsonify(AVAILABLE_MODELS)
+        # 获取基础模型信息
+        models_with_pretrained = []
+        for model in AVAILABLE_MODELS:
+            model_info = model.copy()
+            # 检查是否有预训练模型
+            model_info['has_pretrained'] = PRETRAINED_MANAGER.has_pretrained_model(model['id'])
+            models_with_pretrained.append(model_info)
+        
+        return jsonify(models_with_pretrained)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/pretrained_models', methods=['GET'])
+def get_pretrained_models():
+    """获取预训练模型列表"""
+    try:
+        pretrained_models = PRETRAINED_MANAGER.get_pretrained_models_list()
+        return jsonify(pretrained_models)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -384,32 +429,44 @@ def get_trained_models():
 
 def scan_trained_models():
     """
-    扫描 saved_models 目录，返回每个最佳模型的详细信息列表。
+    扫描 saved_models 目录和预训练模型目录，返回所有可用模型的详细信息列表。
     """
     trained_models = []
-    # 正则表达式用于从文件名中提取 model_id 和 accuracy
-    # 例如: cnn_attention_best_acc_0.9935.pth
+    
+    # 1. 扫描用户训练的模型
     pattern = re.compile(r"^(?P<model_id>.+)_best_acc_(?P<accuracy>\d+\.\d+)\.pth$")
     
-    if not os.path.exists(SAVED_MODELS_DIR):
-        return []
+    if os.path.exists(SAVED_MODELS_DIR):
+        for filename in os.listdir(SAVED_MODELS_DIR):
+            match = pattern.match(filename)
+            if match:
+                model_info = match.groupdict()
+                model_id = model_info['model_id']
+                accuracy = float(model_info['accuracy'])
+                
+                display_name = get_model_name_by_id(model_id)
 
-    for filename in os.listdir(SAVED_MODELS_DIR):
-        match = pattern.match(filename)
-        if match:
-            model_info = match.groupdict()
-            model_id = model_info['model_id']
-            accuracy = float(model_info['accuracy'])
-            
-            # 获取模型的显示名称
-            display_name = get_model_name_by_id(model_id)
-
-            trained_models.append({
-                "model_id": model_id,
-                "display_name": display_name,
-                "filename": filename,
-                "accuracy": accuracy
-            })
+                trained_models.append({
+                    "model_id": model_id,
+                    "display_name": display_name,
+                    "filename": filename,
+                    "accuracy": accuracy,
+                    "is_pretrained": False,
+                    "type": "用户训练"
+                })
+    
+    # 2. 添加预训练模型
+    pretrained_models = PRETRAINED_MANAGER.get_pretrained_models_list()
+    for model in pretrained_models:
+        trained_models.append({
+            "model_id": model['id'],
+            "display_name": model['name'],
+            "filename": f"{model['id']}_pretrained.pth",
+            "accuracy": model['accuracy'],
+            "is_pretrained": True,
+            "type": "预训练模型",
+            "description": model['description']
+        })
             
     # 按准确率降序排序
     trained_models.sort(key=lambda x: x['accuracy'], reverse=True)
@@ -449,8 +506,17 @@ def predict():
         return jsonify({"error": "Internal server error during prediction"}), 500
 
 def load_model_for_prediction(model_id, filename):
-    """为预测加载指定的模型文件。"""
+    """为预测加载指定的模型文件，支持预训练模型和用户训练模型。"""
     try:
+        # 首先尝试加载预训练模型
+        if filename.endswith('_pretrained.pth'):
+            model, error = PRETRAINED_MANAGER.load_pretrained_model(model_id)
+            if model is not None:
+                return model
+            else:
+                print(f"❌ 加载预训练模型失败: {error}")
+        
+        # 加载用户训练的模型
         model_path = os.path.join(SAVED_MODELS_DIR, filename)
         if not os.path.exists(model_path):
             return None
@@ -498,4 +564,13 @@ def check_system_health():
 
 if __name__ == '__main__':
     check_system_health()
-    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
+    # 检测运行环境
+    port = int(os.environ.get('PORT', 5000))
+    debug_mode = os.environ.get('FLASK_ENV') != 'production'
+    
+    print(f"🚀 启动MNIST智能分析平台后端服务")
+    print(f"   端口: {port}")
+    print(f"   调试模式: {debug_mode}")
+    print(f"   预训练模型: {len(PRETRAINED_MANAGER.get_pretrained_models_list())}个")
+    
+    app.run(host='0.0.0.0', port=port, debug=debug_mode, use_reloader=False)

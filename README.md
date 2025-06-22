@@ -78,8 +78,11 @@ mnist-platform/
 git clone <repository-url>
 cd mnist-platform
 
-# 安装Python依赖
+# 安装Python依赖 (已优化为CPU版本)
 pip install -r requirements.txt
+
+# 创建预训练模型 (可选，已包含演示模型)
+python create_demo_models.py
 ```
 
 ### 2. 启动后端服务
@@ -97,6 +100,19 @@ cd frontend
 python -m http.server 8080
 ```
 然后访问 `http://localhost:8080`
+
+## 🌐 云端部署
+
+### 免费部署到公网 (0成本)
+- **前端**: Vercel 静态托管
+- **后端**: Railway Python应用
+- **详细指南**: 查看 [DEPLOYMENT.md](DEPLOYMENT.md)
+
+### 部署优势
+- ✅ **完全免费**: 使用平台免费额度
+- ✅ **即开即用**: 包含6个预训练模型，用户无需等待
+- ✅ **自动部署**: GitHub提交后自动更新
+- ✅ **全球访问**: CDN加速，访问速度快
 
 ## 🎯 使用指南
 
